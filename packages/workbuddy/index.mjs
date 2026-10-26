@@ -1728,14 +1728,33 @@ function runsOutOf(sum, packages, now = Date.now()) {
 // is over.
 function cycleOf(sum, packages, now = Date.now()) {
   const code = sum?.SubscriptionPackageCode
-  if (!code) return null
   const at = (v) => (typeof v === "string" && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(v.trim()) ? Date.parse(v.trim().replace(" ", "T") + "+08:00") : 0)
-  for (const p of packages ?? []) {
-    if (p?.PackageCode !== code) continue
+  const of = (p) => {
     const end = at(p?.CycleEndTime), start = at(p?.CycleStartTime)
-    if (!(end > now)) continue
+    if (!(end > now)) return null
     return { resetsAt: new Date(end).toISOString(), ...(start > 0 && start < end ? { span: (end - start) / 1000 } : {}) }
   }
+  // A summary that does name one goes by it alone: named and not listed, or
+  // its cycle over, is unknown — a paid plan's cycle is its subscription's,
+  // never the slice's (yetone, #415).
+  if (code) {
+    for (const p of packages ?? []) if (p?.PackageCode === code) return of(p)
+    return null
+  }
+  // A free account's summary names no subscription at all: both sites answer
+  // SubscriptionPackageCode "" (copilot.tencent.com and www.workbuddy.ai,
+  // measured 2026-10-26 on eight CN accounts and one AI one), so this
+  // returned null and the card of an account whose credits are being spent
+  // said nothing of when they come back — the one thing cycleOf is for.
+  //
+  // Its plan's own credits are the slice (CapacityType 4): packagesOf's
+  // free list returns a month's plan_base with it, 00:00:00 to 23:59:59
+  // UTC+8, the same cycle on every account on both sites (500 credits on
+  // the CN site, 100 on the international), and its CycleEndTime is when
+  // the plan gives the next month's back. A slice tells no account apart,
+  // which is why runsOutOf keeps it out: which account to spend first is a
+  // different question from when the plan refills.
+  for (const p of packages ?? []) if (String(p?.CapacityType) === SLICE) return of(p)
   return null
 }
 

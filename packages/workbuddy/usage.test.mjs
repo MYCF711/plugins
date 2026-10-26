@@ -336,6 +336,45 @@ test("used credits say when the plan's cycle starts again, as WorkBuddy's client
   expect(w.span).toBe(30 * 86400 - 1)
 })
 
+// 2026-10-26, a real WorkBuddy China-site free account (copilot.tencent.com,
+// ids left out): the summary names no subscription at all — its
+// SubscriptionPackageCode is "" — and the plan's own credits are the month's
+// plan_base (500), which packagesOf's free list returns as the slice
+// (CapacityType 4), 00:00:00 to 23:59:59 UTC+8. Eight CN accounts and one
+// international one answered alike, so a free account's cycle is knowable
+// though nothing names it.
+const CN_FREE_SUMMARY = { IsPaidUser: false, SubscriptionPackageCode: "", SubscriptionPackageName: "体验版", Packages: [
+  { PackageCode: "TCACA_code_007_nzdH5h4Nl0", CycleTotalCapacity: "2900", CycleRemainCapacity: "2618.0000035", CycleUsedCapacity: "281.9999965" },
+  { PackageCode: "TCACA_code_008_cfWoLwvjU4", CycleTotalCapacity: "500", CycleRemainCapacity: "500", CycleUsedCapacity: "0" },
+] }
+const CN_FREE = { TotalCount: 2, Accounts: [
+  // a day's grant that lapses on its own: this is runsOutOf's, not the plan's
+  { PackageCode: "TCACA_code_007_nzdH5h4Nl0", PackageName: "赠送积分", CapacityType: 1, CycleCapacityRemainPrecise: "18.4400035",
+    CycleStartTime: "2026-09-30 01:34:43", CycleEndTime: "2026-10-30 01:34:42", DeductionEndTime: Date.parse("2026-10-29T17:34:42Z"), ExpiredTime: "" },
+  // the plan's own, a month, and the same cycle on every account
+  { PackageCode: "TCACA_code_008_cfWoLwvjU4", PackageName: "套餐基础积分", CapacityType: 4, CycleCapacityRemainPrecise: "500",
+    CycleStartTime: "2026-10-01 00:00:00", CycleEndTime: "2026-10-31 23:59:59", DeductionEndTime: Date.parse("2035-01-01T00:00:00Z"), ExpiredTime: "" },
+] }
+
+test("a free account's cycle: the plan_base slice, since nothing names a subscription", () => {
+  const now = Date.parse("2026-10-26T06:00:00Z")
+  expect(_internal.cycleOf(CN_FREE_SUMMARY, CN_FREE.Accounts, now)).toEqual({ resetsAt: "2026-10-31T15:59:59.000Z", span: 31 * 86400 - 1 })
+  // the two answers live on one window: when the plan refills, and when what
+  // is left lapses. The page words them apart ("Resets …" against
+  // "{n} expire …"), so a free account's card says both.
+  expect(_internal.runsOutOf(CN_FREE_SUMMARY, CN_FREE.Accounts, now)).toEqual({ runsOutAt: "2026-10-29T17:34:42.000Z", runsOut: 18.4400035 })
+  // a paid account still goes by the subscription its summary names
+  expect(_internal.cycleOf(LIVE_SUMMARY, LIVE_PAID.Accounts, now)).toEqual({ resetsAt: "2026-10-28T16:40:52.000Z", span: 30 * 86400 - 1 })
+  // a slice whose cycle is over is unknown, as any other package's is
+  expect(_internal.cycleOf(CN_FREE_SUMMARY, CN_FREE.Accounts, Date.parse("2026-11-01T00:00:00Z"))).toBeNull()
+  // a slice tells no account apart, so it still never decides who is spent first
+  expect(_internal.runsOutOf({ Packages: [{ PackageCode: "TCACA_code_008_cfWoLwvjU4" }] }, CN_FREE.Accounts, now)).toBeNull()
+  // the slice is only the answer when nothing is named: a summary that names
+  // a subscription the lists don't carry is unknown, as it always was — a
+  // paid plan's cycle is its subscription's, not the free slice's (yetone, #415)
+  expect(_internal.cycleOf({ ...CN_FREE_SUMMARY, SubscriptionPackageCode: "PAID_CODE" }, CN_FREE.Accounts, now)).toBeNull()
+})
+
 test("cycleOf: the subscription's cycle end in UTC+8; none named, not listed or over is unknown", () => {
   const now = Date.parse("2026-10-26T06:00:00Z")
   expect(_internal.cycleOf(LIVE_SUMMARY, LIVE_PAID.Accounts, now)).toEqual({ resetsAt: "2026-10-28T16:40:52.000Z", span: 30 * 86400 - 1 })
