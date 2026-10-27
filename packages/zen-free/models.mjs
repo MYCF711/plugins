@@ -53,6 +53,15 @@ function listedFree(id) {
   return /-free$/.test(id);
 }
 
+// Zen's live catalog lists deepseek-v4.1-flash-free at 200000, but the
+// free tier serves the same 258K window as the paid model: a 258,624-token
+// request was answered, and 283,545 tokens was refused as over the
+// maximum (magpie routing history, 2026-10-26). 258K in the 1024-based
+// count the vendor uses is 264,192.
+const CONTEXT = {
+  "deepseek-v4.1-flash-free": 264192,
+};
+
 export function buildModels(ids, provider, protocols, baseURL) {
   const result = {};
   for (const id of ids) {
@@ -81,7 +90,7 @@ export function buildModels(ids, provider, protocols, baseURL) {
       providerID: PROVIDER,
       name: model.name ?? id,
       api: { id, url: baseURL, npm: SDK[protocol] },
-      limit: { context: 32768, output: 4096, ...model.limit },
+      limit: { context: 32768, output: 4096, ...model.limit, ...(CONTEXT[id] ? { context: CONTEXT[id] } : {}) },
       capabilities: {
         temperature: model.temperature ?? true,
         reasoning: model.reasoning ?? false,
