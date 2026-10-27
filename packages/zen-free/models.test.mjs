@@ -113,3 +113,26 @@ test("reads the console docs' endpoint table, and Jev stays out as SystemOne", a
   const models = buildModels(["jev-1.13-free", "step-5-preview-free"], {}, protocols, baseURL);
   assert.deepEqual(Object.keys(models), ["step-5-preview-free"]);
 });
+
+// The catalog's 200000 for deepseek-v4.1-flash-free is stale: Zen's free
+// tier answered a 258,624-token request and refused 283,545 as over the
+// maximum (magpie routing history, 2026-10-26), so the model takes the
+// 258K (264,192) window the paid model is listed with.
+test("deepseek-v4.1-flash-free keeps its measured 258K window over a stale 200K catalog", async () => {
+  const { buildModels } = await subject;
+  const model = {
+    name: "DeepSeek V4.1 Flash Free",
+    cost: { input: 0, output: 0 },
+    limit: { context: 200000, output: 32000 },
+    reasoning: true,
+    tool_call: true,
+  };
+  const models = buildModels(
+    ["deepseek-v4.1-flash-free"],
+    { npm: "@ai-sdk/openai-compatible", models: { "deepseek-v4.1-flash-free": model } },
+    {},
+    baseURL,
+  );
+  assert.equal(models["deepseek-v4.1-flash-free"].limit.context, 264192);
+  assert.equal(models["deepseek-v4.1-flash-free"].limit.output, 32000);
+});
