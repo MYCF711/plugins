@@ -1,13 +1,36 @@
 {
   "name": "@magpie-community/opencode-zen-free-auth",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "description": "OpenCode Zen free models through the public credential, with native streaming protocols",
   "type": "module",
   "main": "./index.mjs",
-  "files": ["index.mjs", "provider.mjs", "models.mjs", "stream.mjs", "tool-response.mjs", "README.md", "LICENSE"],
-  "keywords": ["opencode", "opencode-plugin", "zen", "free", "magpie"],
+  "files": [
+    "index.mjs",
+    "provider.mjs",
+    "models.mjs",
+    "stream.mjs",
+    "tool-response.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "zen",
+    "free",
+    "magpie"
+  ],
   "license": "MIT",
-  "repository": { "type": "git", "url": "https://github.com/magpie-community/plugins", "directory": "packages/zen-free" },
-  "scripts": { "test": "bun test" },
-  "magpie": { "icon": "https://opencode.ai/favicon-v3.ico", "maxConcurrency": 2 }
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/magpie-community/plugins",
+    "directory": "packages/zen-free"
+  },
+  "scripts": {
+    "test": "bun test"
+  },
+  "magpie": {
+    "icon": "https://opencode.ai/favicon-v3.ico",
+    "maxConcurrency": 2
+  }
 }
