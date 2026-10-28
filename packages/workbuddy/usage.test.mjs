@@ -80,10 +80,10 @@ test("counts and plans as Go says them", () => {
 
 test("a prepaid credit package with no total is a balance reading (#3950)", () => {
   expect(_internal.usageOf({ IsPaidUser: false, Packages: [{ CycleTotalCapacity: "", CycleUsedCapacity: "", CycleRemainCapacity: "750" }] }, ""))
-    .toEqual({ plan: "Free plan", windows: [{ name: "Credits", balance: 750, display: "750 credits", unit: "credits" }] })
+    .toEqual({ plan: "Free plan", windows: [{ name: "Prepaid credits", balance: 750, display: "750 credits", unit: "credits" }] })
   // a literal "0" is a reading of nothing left, not an absent field
   expect(_internal.usageOf({ Packages: [{ CycleTotalCapacity: "", CycleRemainCapacity: "0" }] }, ""))
-    .toEqual({ plan: "Free plan", windows: [{ name: "Credits", balance: 0, display: "0 credits", unit: "credits" }] })
+    .toEqual({ plan: "Free plan", windows: [{ name: "Prepaid credits", balance: 0, display: "0 credits", unit: "credits" }] })
   // no remainder field at all: unknown, not a balance
   expect(_internal.usageOf({ Packages: [{ CycleTotalCapacity: "", CycleRemainCapacity: "" }] }, ""))
     .toEqual({ plan: "Free plan", windows: [] })
@@ -94,12 +94,14 @@ test("a prepaid credit package with no total is a balance reading (#3950)", () =
   ] }, ""))
     .toEqual({ plan: "Free plan", windows: [
       { name: "Credits", used: 10, display: "100 / 1000", amount: 100, limit: 1000, unit: "credits" },
-      { name: "Credits", balance: 750, display: "750 credits", unit: "credits" },
+      { name: "Prepaid credits", balance: 750, display: "750 credits", unit: "credits" },
     ] })
+  // TotalCredits alone is not a reading: an account with no packages stays
+  // unknown, so its free models are not skipped
   expect(_internal.usageOf({ Packages: [], TotalCredits: "120" }, ""))
-    .toEqual({ plan: "Free plan", windows: [{ name: "Credits", balance: 120, display: "120 credits", unit: "credits" }] })
+    .toEqual({ plan: "Free plan", windows: [] })
   expect(_internal.usageOf({ Packages: [], TotalCredits: "0" }, ""))
-    .toEqual({ plan: "Free plan", windows: [{ name: "Credits", balance: 0, display: "0 credits", unit: "credits" }] })
+    .toEqual({ plan: "Free plan", windows: [] })
 })
 
 test("WorkBuddy's refusals are the card's error", async () => {
