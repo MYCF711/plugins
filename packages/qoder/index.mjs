@@ -674,10 +674,20 @@ async function fetchListing(site, cred) {
 }
 
 function configModel(m) {
+  const images = !!m.images
   return {
     name: m.name,
     limit: { context: m.context ?? 0, output: 0 },
-    ...(m.images ? { attachment: true, modalities: { input: ["text", "image"], output: ["text"] } } : {}),
+    // Said either way, image or no image. A kind left out is not "text only"
+    // to magpie: it is "the vendor didn't say", and magpie then falls back to
+    // models.dev's vote by bare model id — where a same-named model of
+    // another vendor may take images, so a text-only one here is sent them
+    // (the same mistake codearts 0.2.3 made, fixed there in 0.2.4). The list
+    // a site ships is what magpie has before anyone signs in, and what it
+    // keeps when a listing can't be fetched (provider.models falls back to
+    // it), so those models are the ones most likely to be asked for an image.
+    attachment: images,
+    modalities: { input: images ? ["text", "image"] : ["text"], output: ["text"] },
     ...(m.efforts?.length ? { reasoning: true, variants: Object.fromEntries(m.efforts.map((e) => [e, { reasoningEffort: e }])) } : {}),
     tool_call: true,
   }

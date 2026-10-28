@@ -208,6 +208,14 @@ app's Fast from 2026-10-12:
 
 Every model speaks chat completions (`@ai-sdk/openai-compatible`).
 
+Every model a site ships also says, either way, whether it takes images:
+`attachment` and `modalities.input` are set on every `config` entry, image
+or no image. A kind left out is not "text only" to magpie but "the vendor
+didn't say", and magpie then falls back to models.dev's vote by bare model
+ID — where a same-named model of another vendor may take images, so this
+one gets sent them. QwenWork's three models and Qoder CN's Lite shipped no
+image key; since 0.2.47 they say text alone.
+
 ## Qoder CN
 
 `qoder-cn` is for accounts on [qoder.cn](https://qoder.cn), the China site.
