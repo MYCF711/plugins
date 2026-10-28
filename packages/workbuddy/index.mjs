@@ -1741,8 +1741,10 @@ const compact = (n) => (Number.isInteger(n) ? String(n) : n.toFixed(2).replace(/
 //
 // A package with no CycleTotalCapacity has no denominator: it is sent as
 // magpie's balance-shaped window (#3950), {balance, unit} with no used,
-// limit or aside, and routing ranks it by what is left. A literal "0" is a
-// reading of nothing left, not an absent field; only a package with no
+// limit or aside, and routing ranks it by what is left. A literal "0" total
+// is still a total, not a wallet: it stays on the old path, so a lapsed or
+// placeholder package adds nothing. A literal "0" remainder is a reading
+// of nothing left, not an absent field; only a package with no
 // CycleRemainCapacity at all leaves the window out. TotalCredits is not a
 // fallback: an account with no packages at all keeps its unknown allowance,
 // as before, so its free models are not skipped.
@@ -1751,9 +1753,8 @@ function usageOf(sum, plan) {
   let total = 0, used = 0, left = 0, bags = 0
   for (const p of sum?.Packages ?? []) {
     const hasTotal = p?.CycleTotalCapacity != null && p.CycleTotalCapacity !== ""
-    const totalCapacity = hasTotal ? capacity(p.CycleTotalCapacity) : 0
-    if (totalCapacity > 0) {
-      total += totalCapacity
+    if (hasTotal) {
+      total += capacity(p.CycleTotalCapacity)
       used += capacity(p?.CycleUsedCapacity)
     } else if (p?.CycleRemainCapacity != null && p.CycleRemainCapacity !== "") {
       left += capacity(p.CycleRemainCapacity)

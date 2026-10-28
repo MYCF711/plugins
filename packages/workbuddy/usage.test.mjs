@@ -87,6 +87,10 @@ test("a prepaid credit package with no total is a balance reading (#3950)", () =
   // no remainder field at all: unknown, not a balance
   expect(_internal.usageOf({ Packages: [{ CycleTotalCapacity: "", CycleRemainCapacity: "" }] }, ""))
     .toEqual({ plan: "Free plan", windows: [] })
+  // a "0" total is still a total (a lapsed or placeholder package): old path,
+  // no balance reading, so the account stays unknown as on main
+  expect(_internal.usageOf({ Packages: [{ CycleTotalCapacity: "0", CycleRemainCapacity: "0" }] }, ""))
+    .toEqual({ plan: "Free plan", windows: [] })
   // one package with a total and one without: the latter keeps its own reading
   expect(_internal.usageOf({ Packages: [
     { CycleTotalCapacity: "1000", CycleUsedCapacity: "100" },
