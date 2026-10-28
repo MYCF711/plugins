@@ -53,13 +53,16 @@ function listedFree(id) {
   return /-free$/.test(id);
 }
 
-// Zen's live catalog lists deepseek-v4.1-flash-free at 200000, but the
-// free tier serves the same 258K window as the paid model: a 258,624-token
-// request was answered, and 283,545 tokens was refused as over the
-// maximum (magpie routing history, 2026-10-26). 258K in the 1024-based
-// count the vendor uses is 264,192.
-const CONTEXT = {
-  "deepseek-v4.1-flash-free": 264192,
+// "258K" is the model's working label, not an exact maximum. Zen's live
+// catalog lists deepseek-v4.1-flash-free at 200000, but on 2026-10-26 a
+// request whose upstream usage was in 576 + cache_read 258,048 = 258,624
+// tokens got a 200 from the free tier. That is the measured floor; the
+// later 283,545-token attempt was magpie's own estimate, not upstream
+// usage, so it is not a ceiling. Reporting more than the vendor accepts
+// routes requests that then fail, so the floor is used until a source
+// says more. Remove this when the catalog carries the real value.
+const CONTEXT_FLOOR = {
+  "deepseek-v4.1-flash-free": 258_624,
 };
 
 export function buildModels(ids, provider, protocols, baseURL) {
@@ -90,7 +93,13 @@ export function buildModels(ids, provider, protocols, baseURL) {
       providerID: PROVIDER,
       name: model.name ?? id,
       api: { id, url: baseURL, npm: SDK[protocol] },
-      limit: { context: 32768, output: 4096, ...model.limit, ...(CONTEXT[id] ? { context: CONTEXT[id] } : {}) },
+      limit: {
+        output: 4096,
+        ...model.limit,
+        context: CONTEXT_FLOOR[id]
+          ? Math.max(model.limit?.context ?? 0, CONTEXT_FLOOR[id])
+          : model.limit?.context ?? 32768,
+      },
       capabilities: {
         temperature: model.temperature ?? true,
         reasoning: model.reasoning ?? false,
