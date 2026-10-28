@@ -1739,23 +1739,31 @@ const compact = (n) => (Number.isInteger(n) ? String(n) : n.toFixed(2).replace(/
 // plan: "Free" alone beside the account read as the model being free, and
 // routing as preferring it for that (#337).
 //
-// WorkBuddy China also sells prepaid packages that answer with a remaining
-// count but no cycle total (CycleTotalCapacity empty). Such a package has no
-// denominator, so it is sent as magpie's balance-shaped window (#3950):
-// {balance, unit} with no used/limit/aside, which routing ranks by what is
-// left instead of inventing a percentage.
+// A package with no CycleTotalCapacity has no denominator: it is sent as
+// magpie's balance-shaped window (#3950), {balance, unit} with no used,
+// limit or aside, and routing ranks it by what is left. A literal "0" is a
+// reading of nothing left, not an absent field; only a package with no
+// CycleRemainCapacity at all leaves the window out.
 function usageOf(sum, plan) {
   const out = { plan: plan || (sum?.IsPaidUser ? "Pro" : "Free plan"), windows: [] }
-  let total = 0, used = 0, left = 0
+  let total = 0, used = 0, left = 0, counted = false, bags = 0
   for (const p of sum?.Packages ?? []) {
-    total += capacity(p?.CycleTotalCapacity)
-    used += capacity(p?.CycleUsedCapacity)
-    left += capacity(p?.CycleRemainCapacity ?? p?.CycleCapacityRemainPrecise ?? p?.CycleCapacityRemain ?? p?.CycleRemainingCapacity)
+    const hasTotal = p?.CycleTotalCapacity != null && p.CycleTotalCapacity !== ""
+    const totalCapacity = hasTotal ? capacity(p.CycleTotalCapacity) : 0
+    if (totalCapacity > 0) {
+      total += totalCapacity
+      used += capacity(p?.CycleUsedCapacity)
+      counted = true
+    } else if (p?.CycleRemainCapacity != null && p.CycleRemainCapacity !== "") {
+      left += capacity(p.CycleRemainCapacity)
+      bags++
+    }
   }
   if (total > 0) out.windows.push({ name: "Credits", used: (100 * used) / total, display: `${compact(used)} / ${compact(total)}`, amount: used, limit: total, unit: "credits" })
-  else {
-    const balance = left || capacity(sum?.TotalCredits)
-    if (balance > 0) out.windows.push({ name: "Credits", balance, display: `${compact(balance)} credits`, unit: "credits" })
+  if (bags > 0 && (total === 0 || left > 0)) out.windows.push({ name: "Credits", balance: left, display: `${compact(left)} credits`, unit: "credits" })
+  else if (!counted && bags === 0 && sum?.TotalCredits != null && sum.TotalCredits !== "") {
+    const balance = capacity(sum.TotalCredits)
+    out.windows.push({ name: "Credits", balance, display: `${compact(balance)} credits`, unit: "credits" })
   }
   return out
 }
