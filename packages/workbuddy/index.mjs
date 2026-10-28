@@ -1738,14 +1738,25 @@ const compact = (n) => (Number.isInteger(n) ? String(n) : n.toFixed(2).replace(/
 // as used or left beside the share (magpie#659). The free plan is said as a
 // plan: "Free" alone beside the account read as the model being free, and
 // routing as preferring it for that (#337).
+//
+// WorkBuddy China also sells prepaid packages that answer with a remaining
+// count but no cycle total (CycleTotalCapacity empty). Such a package has no
+// denominator, so it is sent as magpie's balance-shaped window (#3950):
+// {balance, unit} with no used/limit/aside, which routing ranks by what is
+// left instead of inventing a percentage.
 function usageOf(sum, plan) {
   const out = { plan: plan || (sum?.IsPaidUser ? "Pro" : "Free plan"), windows: [] }
-  let total = 0, used = 0
+  let total = 0, used = 0, left = 0
   for (const p of sum?.Packages ?? []) {
     total += capacity(p?.CycleTotalCapacity)
     used += capacity(p?.CycleUsedCapacity)
+    left += capacity(p?.CycleRemainCapacity ?? p?.CycleCapacityRemainPrecise ?? p?.CycleCapacityRemain ?? p?.CycleRemainingCapacity)
   }
   if (total > 0) out.windows.push({ name: "Credits", used: (100 * used) / total, display: `${compact(used)} / ${compact(total)}`, amount: used, limit: total, unit: "credits" })
+  else {
+    const balance = left || capacity(sum?.TotalCredits)
+    if (balance > 0) out.windows.push({ name: "Credits", balance, display: `${compact(balance)} credits`, unit: "credits" })
+  }
   return out
 }
 

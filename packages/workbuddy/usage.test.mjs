@@ -78,6 +78,13 @@ test("counts and plans as Go says them", () => {
   expect(() => _internal.usageOf({ Packages: [{ CycleTotalCapacity: "lots" }] })).toThrow('strconv.ParseFloat: parsing "lots": invalid syntax')
 })
 
+test("a prepaid credit package with no total is a balance reading (#3950)", () => {
+  expect(_internal.usageOf({ IsPaidUser: false, Packages: [{ CycleTotalCapacity: "", CycleUsedCapacity: "", CycleRemainCapacity: "750" }] }, ""))
+    .toEqual({ plan: "Free plan", windows: [{ name: "Credits", balance: 750, display: "750 credits", unit: "credits" }] })
+  expect(_internal.usageOf({ Packages: [], TotalCredits: "120" }, ""))
+    .toEqual({ plan: "Free plan", windows: [{ name: "Credits", balance: 120, display: "120 credits", unit: "credits" }] })
+})
+
 test("WorkBuddy's refusals are the card's error", async () => {
   const auth = { type: "oauth", access: "a", expires: later(), uid: "u" }
   // a bare 401 (no invalid_token) with nothing to renew with: said, not marked
