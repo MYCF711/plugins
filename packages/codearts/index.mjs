@@ -2552,13 +2552,17 @@ export const CodeArtsAuthPlugin = async ({ client } = {}, options = {}) => {
         }
         const identified = next.user_phone ? next : { ...next, ...(await accountPhoneField(next, fetcher)) }
         const identity = accountIdentityOf(identified)
+        // accountId is the account's identity in magpie (its user-set name,
+        // proxy, model picks and a gateway key's list hang off it), so a
+        // renewal never renames one. An account stored without an accountId at
+        // all gets the URN, as main does — otherwise signing it in again would
+        // add a second row.
+        const accountId = auth.accountId ? "" : identity.id
         return {
           access: JSON.stringify(identified),
           refresh: identified.refresh_token,
           expires: expiresFromCredential(identified),
-          // accountId is the account's identity in magpie (its user-set name,
-          // proxy, model picks and a gateway key's list hang off it), so a
-          // renewal never renames one: only `uid` (the URN) rides along.
+          ...(accountId ? { accountId } : {}),
           ...(identity.id ? { uid: identity.id } : {}),
         }
       },
@@ -2725,15 +2729,14 @@ export const CodeArtsAuthPlugin = async ({ client } = {}, options = {}) => {
                   const outcome = await flow.result
                   const cred = safeJson(outcome.access)
                   if (!cred?.access_key_id) return { type: "failed", error: "CodeArts did not return a credential" }
-                  // The card needs a name a person can tell apart, and the
-                  // token carries only IAM's `hw…` id; the phone is one read
-                  // away (best effort: a failed read still signs in).
+                  // The card's name is the phone (one read away, best effort:
+                  // a failed read still signs in), shown through usage's
+                  // `user`; the credential carries it as `user_phone`.
                   const identified = { ...cred, ...(await accountPhoneField(cred, fetcher)) }
                   const identity = accountIdentityOf(identified)
-                  // `accountId` is the card's name — the phone when IAM gives
-                  // one, else the account's own `hw…` name, never the URN.
-                  // `uid` is the URN: with the same `accountId` it lets magpie
-                  // replace this account instead of adding a `codearts#xxxxxx`.
+                  // `accountId` is the account's identity — the URN, as main
+                  // gives it — so a re-sign-in replaces the account instead of
+                  // adding a `codearts#xxxxxx`; `uid` is that same URN.
                   return {
                     type: "success",
                     access: JSON.stringify(identified),

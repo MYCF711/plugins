@@ -2459,3 +2459,23 @@ test("a code STS turns down sends the browser to the portal's failure page", asy
     await assert.rejects(result, /token request failed: 400/)
   })
 })
+
+test("auth.refresh keeps a named account's identity and gives an unnamed one the URN (review #483)", async () => {
+  const urn = "iam::d:user:hw123"
+  const profiled = credWithProfile({ principal_urn: urn })
+  const cred = { ...(await makeCred()), refresh_token: profiled.refresh_token }
+  const fetcher = async () =>
+    new Response(JSON.stringify({
+      credentials: { access_key_id: "AK2", secret_access_key: "SK2", security_token: "ST2", expiration: "2031-01-01T00:00:00Z" },
+      refresh_token: profiled.refresh_token,
+    }), { status: 200 })
+  const plugin = await CodeArtsAuthPlugin({ client: {} }, { fetch: fetcher })
+
+  // 已存 accountId 的账号：续期不改身份
+  const named = await plugin.auth.refresh({ ...makeAuth(cred), accountId: urn })
+  assert.equal(named.accountId, undefined)
+
+  // 没有 accountId 的账号：续期补上 URN（否则重登会多一行）
+  const unnamed = await plugin.auth.refresh(makeAuth(cred))
+  assert.match(String(unnamed.accountId ?? ""), /^iam::/)
+})

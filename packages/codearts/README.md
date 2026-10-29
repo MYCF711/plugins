@@ -43,10 +43,12 @@ the other magpie cards mask theirs), read once after signing in from Huawei Clou
 the same temporary credentials — and kept on the credential as `user_phone`. The refresh token
 names the signer only by IAM's own ids (`hw12323`, and the URN
 `iam::<domain>:user:<name>`), which read as an ID nobody can tell apart from another account's;
-the account name is the fallback when the phone can't be read, and the URN never is. The
-signer's URN still goes to magpie as `uid`, so signing in again replaces the account instead of
-adding one — including an account stored by an older version, whose name is corrected at its
-next renewal. IAM is *not* one of the hosts the plugin signs forwarded requests for
+the account name is the fallback when the phone can't be read, and the URN never is.
+
+`accountId` is the account's identity — the URN, as before — and it never changes: magpie
+keys the user's own name for the account, its proxy, model picks and a gateway key's list by
+it, so a re-sign-in and a renewal give the same value back. The card's name is usage's `user`,
+which shows `user_phone` once a sign-in or renewal has read it. IAM is *not* one of the hosts the plugin signs forwarded requests for
 (`SIGNED_HOSTS`): the one phone read is made by the plugin itself, for that one URL.
 
 ## Models
