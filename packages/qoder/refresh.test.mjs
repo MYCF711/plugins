@@ -38,6 +38,9 @@ function serve(site, { job, device } = {}) {
     if (u.host === site.openapi && u.pathname === "/api/v1/jobToken/refresh") return job ? job(token) : json({ token: "jt-2", refresh_token: "jrt-2", expires_in: 3_600_000 })
     if (u.host === site.openapi && u.pathname === "/api/v1/deviceToken/refresh")
       return device ? device(token) : json({ device_token: "dt-2", refresh_token: "drt-2", expires_at: new Date(Date.now() + 7_200_000).toISOString() })
+    // the card's name: a renewal reads the user info once (the phone it shows)
+    if (u.host === site.openapi && u.pathname === "/api/v1/userinfo")
+      return json({ id: "u1", name: "one@x", security_mobile: "18970098051" })
     return new Response("", { status: 500 })
   }
   return calls
@@ -58,10 +61,13 @@ for (const site of SITES) {
     expect(hooks.auth.refreshLead).toBe(10 * 60 * 1000)
     const got = await hooks.auth.refresh(account(), { id: site.name })
     expect(got).toMatchObject({ access: "jt-2", refresh: "jrt-2" })
-    expect(Object.keys(got).sort()).toEqual(["access", "expires", "refresh"])
+    // the renewal also names the account (the phone, not its uuid), so an
+    // account stored by an earlier version is renamed here
+    expect(Object.keys(got).sort()).toEqual(["access", "accountId", "expires", "refresh"])
+    expect(got.accountId).toBe("189****8051")
     expect(got.expires).toBeGreaterThan(Date.now() + 3_000_000)
     expect(sets).toEqual([])
-    expect(calls).toEqual([`${site.openapi}/api/v1/jobToken/refresh jrt-1`])
+    expect(calls.filter((c) => c.includes("Token/refresh"))).toEqual([`${site.openapi}/api/v1/jobToken/refresh jrt-1`])
   })
 
   test(`${site.name}: auth.refresh and a request's refresh spend the refresh token once`, async () => {
@@ -129,7 +135,8 @@ test("qoder-cn: a device-token account is renewed as a device token, both pairs 
   expect(got.expires).toBeGreaterThan(Date.now() + 7_000_000)
   expect(got.type).toBeUndefined()
   expect(sets).toEqual([])
-  expect(calls).toEqual([`${site.openapi}/api/v1/deviceToken/refresh drt-1`])
+  // a device-token renewal also reads the user info once, for the card's name
+  expect(calls.filter((c) => c.includes("Token/refresh"))).toEqual([`${site.openapi}/api/v1/deviceToken/refresh drt-1`])
 
   serve(site, { device: () => new Response("", { status: 401 }) })
   const p = await plugin(site, a)

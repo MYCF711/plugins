@@ -375,10 +375,11 @@ async function deviceSignIn(site) {
       let email = ""
       let name = ""
       let uid = dt.user_id
+      let user = null
       try {
         const ui = await openapi(site, site.userInfoPath ?? "/api/v1/userinfo", { token: dt.token })
         if (ui.status >= 200 && ui.status < 300) {
-          const user = site.normalizeUser ? site.normalizeUser(ui.json) : ui.json
+          user = site.normalizeUser ? site.normalizeUser(ui.json) : ui.json
           ;[email, name] = [user?.email ?? "", user?.name ?? ""]
           if (site.deviceOnly) uid = String(user?.id ?? user?.user_id ?? user?.uid ?? uid ?? "") || undefined
           // a VPC poll may give the token alone: the user is then the one
@@ -393,7 +394,9 @@ async function deviceSignIn(site) {
         ...chat,
         // a VPC account is told apart from the same person's public one; a
         // device-only one is shown by name, falling back to its id
-        accountId: site.vpc ? `${email || uid} (${site.vpc})` : site.deviceOnly ? email || uid || name || dt.user_id : email || dt.user_id,
+        accountId: site.vpc
+          ? `${accountLabelOf(user, uid, name, email, dt)} (${site.vpc})`
+          : accountLabelOf(user, uid, name, email, dt),
         uid,
         email,
         name: name || dt.user_name || "",
@@ -430,9 +433,11 @@ async function patSignIn(site, pat) {
   let email = ""
   let name = ""
   let uid = ""
+  let user = null
   try {
     const ui = await openapi(site, "/api/v1/userinfo", { token })
     if (ui.status >= 200 && ui.status < 300) {
+      user = ui.json
       ;[email, name] = [ui.json?.email ?? "", ui.json?.name ?? ""]
       uid = String(ui.json?.id ?? ui.json?.user_id ?? ui.json?.uid ?? "")
     }
@@ -445,7 +450,7 @@ async function patSignIn(site, pat) {
     // an account on a new sign-in when both the accountId and the uid match,
     // so a renewed PAT sign-in must keep naming the same account. A suffix
     // here would add a second row beside the lapsed one instead.
-    accountId: email || uid,
+    accountId: accountLabelOf(user, uid, name, email),
     uid,
     email,
     name: name || "",
@@ -1865,6 +1870,64 @@ function signed(res, renewed) {
 }
 
 // changed is the fields of b that differ from a's: what auth.refresh gives.
+// ---- the card's name ----------------------------------------------------------
+//
+// `accountId` is what the card shows, and a uuid is not a name. Both phone
+// sign-ins here carry the phone somewhere in their user info: Qoder CN answers
+// `security_mobile` (measured `18970098051`), QwenWork's phone accounts answer
+// only the last four digits as `name` plus a synthetic
+// `phone_<uuid>@phone.local` email (measured).
+const PHONE_EMAIL = /^phone_[0-9a-f-]+@phone\.local$/i
+
+/** A phone number as the cards show it: `0086-…`/`+86 …`/bare → `189****8051`. */
+function maskPhone(raw) {
+  let digits = String(raw ?? "").replace(/\D/g, "")
+  if (digits.startsWith("0086") && digits.length - 4 >= 7) digits = digits.slice(4)
+  else if (digits.startsWith("86") && digits.length - 2 >= 7) digits = digits.slice(2)
+  if (digits.length < 7) return ""
+  return `${digits.slice(0, 3)}****${digits.slice(-4)}`
+}
+
+/**
+ * The card's name: the phone when the account signed in with one, else a real
+ * email, else the name, else the id. A synthetic phone email is never shown —
+ * its last four digits are (`****8051`), which is all the vendor gives.
+ */
+// One read per token, for the life of the process: the card asks at each
+// renewal, and the account's own name does not change under one token.
+const labelByToken = new Map()
+const LABEL_TTL_MS = 6 * 60 * 60 * 1000
+
+/** The card's name for a renewed credential, read from its user info (cached). */
+async function refreshedLabelOf(site, token, a) {
+  const key = String(token ?? "")
+  if (!key) return ""
+  const hit = labelByToken.get(key)
+  if (hit && Date.now() - hit.at < LABEL_TTL_MS) return hit.label
+  try {
+    const ui = await openapi(site, site.userInfoPath ?? "/api/v1/userinfo", { token: key })
+    if (ui.status < 200 || ui.status >= 300) return ""
+    const user = site.normalizeUser ? site.normalizeUser(ui.json) : ui.json
+    const label = accountLabelOf(user, a?.uid, a?.name, a?.email)
+    if (label) labelByToken.set(key, { at: Date.now(), label })
+    return label
+  } catch {
+    return ""
+  }
+}
+
+function accountLabelOf(user, uid, name, email, dt) {
+  const phone = maskPhone(user?.security_mobile ?? user?.phoneNumber ?? user?.phone ?? user?.mobile)
+  if (phone) return phone
+  // a synthetic phone email is never shown: its four digits are, or nothing
+  const synthetic = PHONE_EMAIL.test(String(email ?? ""))
+  if (synthetic) {
+    const tail = String(name ?? "").trim()
+    if (/^\d{4}$/.test(tail)) return `****${tail}`
+  }
+  return String(synthetic ? "" : (email ?? "")) || String(name ?? "") || String(uid ?? "") || String(dt?.user_id ?? "")
+}
+
 function changed(a, b) {
   const out = {}
   for (const k of ["access", "refresh", "expires", "deviceToken", "deviceRefresh"]) if (b[k] !== a[k]) out[k] = b[k]
@@ -2910,8 +2973,12 @@ const makePlugin = (site) => async ({ client }) => {
           const a = latest(auth)
           if (a.access !== auth.access && a.expires - Date.now() > RENEW_LEAD) return changed(auth, a)
           try {
-            // magpie saves what this gives
-            return changed(auth, { ...a, ...(await renew(a)) })
+            // magpie saves what this gives; an account stored by an earlier
+            // version was named by its uuid, and its renewal is where the
+            // user info can still be read for the name the card should show
+            const next = { ...a, ...(await renew(a)) }
+            const label = await refreshedLabelOf(site, next.access, a)
+            return label ? { ...changed(auth, next), accountId: label } : changed(auth, next)
           } catch (e) {
             if (e?.expired) throw Object.assign(new Error(e.message), { signIn: "expired" })
             throw e
@@ -3125,4 +3192,4 @@ export async function QwenWorkEnterpriseAuthPlugin({ client }) {
 export const protocol = { makePlugin, deviceSignIn, openapi, siteOf }
 
 // for tests
-export const _internal = { chatHeaders, machineOS, machineHostname, cosyHeaders, typedUnions, Splitter, campaignRuntime, RUNTIMES, campaignPage, campaignTarget, vpcInstance, vpcSite, parseUsage, gfmt, when, failure, modelInfo, qoderBody, qoderMessages, cacheMarked, sessionOf, namedSession, taskOf, TASKS, TASK_MAX, TASK_IDLE, SESSION, SITES, decodeBody, events, QUEUE, queueState }
+export const _internal = { maskPhone, accountLabelOf, chatHeaders, machineOS, machineHostname, cosyHeaders, typedUnions, Splitter, campaignRuntime, RUNTIMES, campaignPage, campaignTarget, vpcInstance, vpcSite, parseUsage, gfmt, when, failure, modelInfo, qoderBody, qoderMessages, cacheMarked, sessionOf, namedSession, taskOf, TASKS, TASK_MAX, TASK_IDLE, SESSION, SITES, decodeBody, events, QUEUE, queueState }
