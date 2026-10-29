@@ -70,7 +70,7 @@ const SIGNED_HOSTS = new Set([SNAP_HOST, OPENGW_HOST].map((u) => new URL(u).host
 
 // Huawei Cloud IAM: the one place an account's own phone number can be read
 // with the credentials a sign-in already carries (`GET /v3.0/OS-USER/users/
-// {principal_id}` answers `user.phone`, measured `0086-18970098051`).
+// {principal_id}` answers `user.phone`, measured `0086-13800138000`).
 //
 // Deliberately NOT in SIGNED_HOSTS. magpie forwards requests through this
 // plugin's `fetch`, and that set is the fence around the account's temporary
@@ -530,7 +530,7 @@ function accountIdentityOf(cred) {
 }
 
 /**
- * A phone number as the cards show it: `0086-18970098051` → `189****8051`.
+ * A phone number as the cards show it: `0086-13800138000` → `138****8000`.
  * The area code Huawei answers with is dropped, and any number too short to
  * mask is not a name worth showing (empty, so the caller falls back).
  */
@@ -540,13 +540,25 @@ function maskPhone(raw) {
   // may come as `+86 …`. Either is dropped when an 11-digit number follows.
   if (digits.length > 11 && digits.startsWith("0086")) digits = digits.slice(4)
   else if (digits.length > 11 && digits.startsWith("86")) digits = digits.slice(2)
-  if (digits.length < 7) return ""
+  // a phone is 11 digits; a shorter run is not a number to mask
+  if (digits.length < 11) return ""
   return `${digits.slice(0, 3)}****${digits.slice(-4)}`
 }
 
-// One phone read per IAM user, for the life of the process: the account's
-// phone does not change, and both sign-in and every usage read ask for it.
+// One phone read per IAM user, re-read after IAM_PHONE_TTL_MS. A failed read
+// is cached too (an empty answer): without that, a card refresh asks IAM again
+// every time, each able to wait the full timeout. Stale entries are dropped
+// past a cap, so the map does not grow for the life of the host.
+const IAM_PHONE_CAP = 1024
 const phoneByIamUser = new Map()
+
+function rememberPhone(iamUserId, phone) {
+  if (phoneByIamUser.size >= IAM_PHONE_CAP) {
+    for (const [k, v] of phoneByIamUser) if (Date.now() - v.at >= IAM_PHONE_TTL_MS) phoneByIamUser.delete(k)
+    if (phoneByIamUser.size >= IAM_PHONE_CAP * 2) phoneByIamUser.clear()
+  }
+  phoneByIamUser.set(iamUserId, { at: Date.now(), phone })
+}
 
 /**
  * The account's own phone number, read from Huawei Cloud IAM with the
@@ -575,12 +587,16 @@ async function fetchAccountPhone(cred, fetcher = globalThis.fetch) {
       redirect: "error",
       signal: AbortSignal.timeout(IAM_TIMEOUT_MS),
     })
-    if (!res.ok) return ""
+    if (!res.ok) {
+      rememberPhone(iamUserId, "")
+      return ""
+    }
     const body = await res.json().catch(() => null)
     const phone = maskPhone(body?.user?.phone)
-    if (phone) phoneByIamUser.set(iamUserId, { at: Date.now(), phone })
+    rememberPhone(iamUserId, phone)
     return phone
   } catch {
+    rememberPhone(iamUserId, "")
     return ""
   }
 }
@@ -2540,8 +2556,9 @@ export const CodeArtsAuthPlugin = async ({ client } = {}, options = {}) => {
           access: JSON.stringify(identified),
           refresh: identified.refresh_token,
           expires: expiresFromCredential(identified),
-          // The card's name, not IAM's URN; the URN goes as `uid`.
-          ...(identity.name ? { accountId: identity.name } : {}),
+          // accountId is the account's identity in magpie (its user-set name,
+          // proxy, model picks and a gateway key's list hang off it), so a
+          // renewal never renames one: only `uid` (the URN) rides along.
           ...(identity.id ? { uid: identity.id } : {}),
         }
       },
@@ -2722,7 +2739,7 @@ export const CodeArtsAuthPlugin = async ({ client } = {}, options = {}) => {
                     access: JSON.stringify(identified),
                     refresh: cred.refresh_token,
                     expires: outcome.expires,
-                    ...(identity.name ? { accountId: identity.name } : {}),
+                    accountId: identity.id,
                     ...(identity.id ? { uid: identity.id } : {}),
                   }
                 } catch (e) {
@@ -2752,10 +2769,10 @@ function nearExpiry(cred) {
  */
 async function persistCredential(client, account, cred) {
   const identity = accountIdentityOf(cred)
-  // `accountId` is what the card shows: the human name (the phone), never the
-  // URN. The URN rides along as `uid`, which is what magpie tells a second
-  // sign-in of the same account apart from another account by.
-  const accountId = firstOf(identity.name, account?.accountId, identity.id)
+  // `accountId` is the account's identity in magpie, so it stays what main
+  // stores: the URN, and what the record already had first. The phone is in
+  // the credential (`user_phone`) and shown by usage's `user`.
+  const accountId = firstOf(account?.accountId, identity.id)
   const uid = firstOf(identity.id, account?.uid)
   const body = {
     ...asRecord(account),

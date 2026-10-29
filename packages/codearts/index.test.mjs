@@ -271,11 +271,11 @@ function credWithProfile(claims) {
 }
 
 test("maskPhone shows a number a person can tell apart, or nothing", () => {
-  // Huawei Cloud IAM answers `0086-18970098051`; the other magpie cards show
-  // `189****8051`.
-  assert.equal(x.maskPhone("0086-18970098051"), "189****8051")
-  assert.equal(x.maskPhone("+86 189 7009 8051"), "189****8051")
-  assert.equal(x.maskPhone("18970098051"), "189****8051")
+  // Huawei Cloud IAM answers `0086-13800138000`; the other magpie cards show
+  // `138****8000`.
+  assert.equal(x.maskPhone("0086-13800138000"), "138****8000")
+  assert.equal(x.maskPhone("+86 138 0013 8000"), "138****8000")
+  assert.equal(x.maskPhone("13800138000"), "138****8000")
   // Too short to be a number: no name, so the caller falls back.
   assert.equal(x.maskPhone(""), "")
   assert.equal(x.maskPhone("12345"), "")
@@ -284,15 +284,15 @@ test("maskPhone shows a number a person can tell apart, or nothing", () => {
 
 test("accountIdentityOf names an account by its phone, never by IAM's ids", () => {
   const b64u = (o) => Buffer.from(JSON.stringify(o)).toString("base64url")
-  const profile = { principal_urn: "iam::d1:user:hw123", account_name: "hw123" }
+  const profile = { principal_urn: "iam::d1:user:hw12323", account_name: "hw12323" }
   const token = `h.${b64u({ user_profile: JSON.stringify(profile) })}.s`
-  // The phone read from IAM stands in front of `hw123` and of the URN.
-  assert.deepEqual(x.accountIdentityOf({ refresh_token: token, user_phone: "189****8051" }), {
-    id: "iam::d1:user:hw123",
-    name: "189****8051",
+  // The phone read from IAM stands in front of `hw12323` and of the URN.
+  assert.deepEqual(x.accountIdentityOf({ refresh_token: token, user_phone: "138****8000" }), {
+    id: "iam::d1:user:hw12323",
+    name: "138****8000",
   })
   // Without one, the account name — while `id` stays the URN magpie keys by.
-  assert.deepEqual(x.accountIdentityOf({ refresh_token: token }), { id: "iam::d1:user:hw123", name: "hw123" })
+  assert.deepEqual(x.accountIdentityOf({ refresh_token: token }), { id: "iam::d1:user:hw12323", name: "hw12323" })
 })
 
 test("fetchAccountPhone reads IAM with the account's own credentials, and only once", async () => {
@@ -300,14 +300,14 @@ test("fetchAccountPhone reads IAM with the account's own credentials, and only o
   const cred = credWithProfile({ principal_id: "uid-1" })
   const fetcher = async (url, init) => {
     seen.push([String(url), new Headers(init.headers).get("authorization")])
-    return new Response(JSON.stringify({ user: { name: "hw123", phone: "0086-18970098051" } }), { status: 200 })
+    return new Response(JSON.stringify({ user: { name: "hw12323", phone: "0086-13800138000" } }), { status: 200 })
   }
-  assert.equal(await x.fetchAccountPhone(cred, fetcher), "189****8051")
+  assert.equal(await x.fetchAccountPhone(cred, fetcher), "138****8000")
   assert.equal(seen.length, 1)
   assert.equal(seen[0][0], "https://iam.cn-north-4.myhuaweicloud.com/v3.0/OS-USER/users/uid-1")
   assert.ok(String(seen[0][1]).startsWith("SDK-HMAC-SHA256 "), "signed, like every other call of the account")
   // The number does not change: the second read is free.
-  assert.equal(await x.fetchAccountPhone(cred, fetcher), "189****8051")
+  assert.equal(await x.fetchAccountPhone(cred, fetcher), "138****8000")
   assert.equal(seen.length, 1)
 })
 
@@ -318,13 +318,13 @@ test('fetchAccountPhone is best effort — no claim, a refusal, or no number giv
   const cred = credWithProfile({ principal_id: "uid-2" })
   assert.equal(await x.fetchAccountPhone(cred, async () => new Response("{}", { status: 403 })), "")
   assert.equal(
-    await x.fetchAccountPhone(cred, async () => new Response(JSON.stringify({ user: { name: "hw123" } }), { status: 200 })),
+    await x.fetchAccountPhone(cred, async () => new Response(JSON.stringify({ user: { name: "hw12323" } }), { status: 200 })),
     "",
   )
 })
 
 test("usage names an account by the phone its credential carries", async () => {
-  const cred = { ...(await makeCred()), user_phone: "189****8051" }
+  const cred = { ...(await makeCred()), user_phone: "138****8000" }
   const plugin = await CodeArtsAuthPlugin({ client: {} }, {
     fetch: async () => new Response(JSON.stringify({ metrics: [
       { name: "usageTotalPackageCredit", package_credit_amount: 500, package_credit_remain: 500 },
@@ -332,24 +332,26 @@ test("usage names an account by the phone its credential carries", async () => {
     ledgerPath: path.join(ledgerDir, "unused.json"),
   })
   const usage = await plugin.auth.usage(async () => makeAuth(cred))
-  assert.equal(usage.user, "189****8051")
+  assert.equal(usage.user, "138****8000")
   assert.equal(usage.windows.length > 0, true, "the phone must not replace the windows")
 })
 
-test("a refresh stores the phone as the account's name and the URN as its uid", async () => {
+test("a renewal keeps the account's name and its uid, with the phone in the credential", async () => {
   const saved = []
   const client = { auth: { set: async ({ body }) => { saved.push(body) } } }
   const cred = {
     ...(await makeCred()),
-    user_phone: "189****8051",
-    refresh_token: credWithProfile({ principal_urn: "iam::d:user:hw1" }).refresh_token,
+    user_phone: "138****8000",
+    refresh_token: credWithProfile({ principal_urn: "iam::d:user:hw123" }).refresh_token,
   }
-  const account = await x.persistCredential(client, { accountId: "iam::d:user:hw1" }, cred)
+  const account = await x.persistCredential(client, { accountId: "iam::d:user:hw123", uid: "iam::d:user:hw123" }, cred)
   assert.equal(saved.length, 1)
-  // What the card shows, and what tells two accounts apart.
-  assert.equal(saved[0].accountId, "189****8051")
-  assert.equal(saved[0].uid, "iam::d:user:hw1")
-  assert.equal(account.accountId, "189****8051")
+  // accountId is the identity: it must not be renamed (magpie keys the user's
+  // own settings by it). The phone lives in the credential and is shown by usage.
+  assert.equal(saved[0].accountId, "iam::d:user:hw123")
+  assert.equal(saved[0].uid, "iam::d:user:hw123")
+  assert.equal(JSON.parse(saved[0].access).user_phone, "138****8000")
+  assert.equal(account.accountId, "iam::d:user:hw123")
 })
 
 test("accountSessionIds is stable per account and differs between accounts", async () => {
