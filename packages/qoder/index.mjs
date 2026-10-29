@@ -403,16 +403,12 @@ async function deviceSignIn(site) {
           : site.deviceOnly
             ? email || uid || name || dt.user_id
             : email || dt.user_id,
-        phoneLabel: (() => {
+        // the card's names: the phone on its own, and what magpie shows (a
+        // real email first, then the phone) — never the accountId
+        ...(() => {
           const label = phoneLabelOf(user, email, name)
-          return label ? (site.vpc ? `${label} (${site.vpc})` : label) : ""
-        })(),
-        // the card's name, what magpie shows: a real email first, then the
-        // phone (review #487, B) — never the accountId
-        cardName: (() => {
-          const label = phoneLabelOf(user, email, name)
-          const named = realEmailOf(email) || label
-          return named ? (site.vpc ? `${named} (${site.vpc})` : named) : ""
+          const suffix = (v) => (v ? (site.vpc ? `${v} (${site.vpc})` : v) : "")
+          return { phoneLabel: suffix(label), cardName: suffix(realEmailOf(email) || label) }
         })(),
         uid,
         email,
@@ -1909,10 +1905,10 @@ function maskPhone(raw) {
 }
 
 /**
- * What a renewal may put on the card: the phone the account signs in with
- * (`138****8000`), or its real email — never the JWT's name and never an id.
- * A renewal only renames a phone account: an account named by an email or a
- * uuid keeps that name, since the sign-ins name it the same way.
+ * What a renewal puts on the record for the card: `phoneLabel` (the phone the
+ * account signs in with, `138****8000` / `****8000`) and `cardName` (a real
+ * email first, then the phone) — both with the VPC suffix. It renames nothing:
+ * `accountId` is the identity and never changes.
  *
  * Read from the renewed token's user info. No cache: each renewal has a new
  * token, so nothing is read twice (review #487, 6).

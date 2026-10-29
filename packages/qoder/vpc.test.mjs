@@ -381,10 +381,10 @@ test("a VPC account's renewal asks its own instance for the name, and keeps the 
     accountId: "alice@corp.example (acme)",
     expires: Date.now() + 1_000,
   })
-  // accountId 不动（它是身份），手机号只落在 phoneLabel 上
+  // accountId does not move (it is the identity); the phone lands on phoneLabel only
   expect(got.accountId).toBeUndefined()
   expect(got.phoneLabel).toBe("138****8000 (acme)")
-  // 并且一次都没碰公网 host：企业 token 不发到 openapi.qoder.com.cn
+  // and no public host was touched: an enterprise token never goes there
   expect(at.some((w) => w.startsWith(OPENAPI))).toBe(true)
   expect(at.some((w) => w.startsWith("openapi.qoder.com.cn"))).toBe(false)
   expect(at.some((w) => PUBLIC.some((p) => w.startsWith(p)))).toBe(false)
@@ -404,15 +404,15 @@ test("a hanging user-info read does not hold another account's chat (review #487
   }
   try {
     const hooks = await QoderCNAuthPlugin({ client: { auth: { set: async () => {} } } })
-    // 账号 A 续期：token 已换，名字正在读（user info 挂着）
+    // account A renews: its token is swapped and the name read is hanging
     const pending = hooks.auth.refresh({ type: "oauth", access: "jt-a1", refresh: "jrt-a1", uid: "u-a", expires: Date.now() + 1_000 })
     for (let i = 0; i < 50 && !userinfoReached; i++) await new Promise((r) => setTimeout(r, 10))
     expect(userinfoReached).toBe(true)
-    // 账号 B 的对话不能等它
+    // account B's chat must not wait on it
     const loader = await hooks.auth.loader(async () => ({ type: "oauth", access: "jt-b", refresh: "jrt-b", uid: "u-b", expires: Date.now() + 86_400_000 }))
     const at = Date.now()
     const res = await loader.fetch("https://api3.qoder.sh/v1/chat/completions", { method: "POST", body: JSON.stringify({ model: "q", messages: [] }) })
-    // 核心断言是「没等」：返回什么状态不重要，重要是它没被另一个账号的 user-info 拖住
+    // the point is that it did not wait: any status is fine, being held is not
     expect(res).toBeInstanceOf(Response)
     expect(Date.now() - at).toBeLessThan(1_000)
     release()
