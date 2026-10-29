@@ -91,9 +91,10 @@ test("qoder-cn: a PAT account keeps the name its browser sign-in takes", async (
 
   // no suffix: magpie's host replaces an account on a new sign-in when both
   // the accountId and the uid match, so a re-signed PAT must name the same
-  // account the browser sign-in does, not a row of its own beside it —
-  // both take the same label from the same user info (here its `name`)
-  expect(res.accountId).toBe("Someone")
+  // account the browser sign-in does, not a row of its own beside it.
+  // This account has neither a phone nor an email: both paths keep naming it
+  // by its uid, as they did before the phone label (review #487, 5).
+  expect(res.accountId).toBe("same-user")
   expect(res.uid).toBe("same-user")
   expect(res.email).toBe("")
 })

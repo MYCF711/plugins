@@ -394,9 +394,16 @@ async function deviceSignIn(site) {
         ...chat,
         // a VPC account is told apart from the same person's public one; a
         // device-only one is shown by name, falling back to its id
-        accountId: site.vpc
-          ? `${accountLabelOf(user, uid, name, email, dt)} (${site.vpc})`
-          : accountLabelOf(user, uid, name, email, dt),
+        accountId: (() => {
+          // 名字只在账号「有手机号」时才变：非手机账号保持原来的 email || uid，
+          // 否则老账号重登会变成新的一行（评审 #487 第 5 点）
+          const phone = phoneLabelOf(user, email, name)
+          return site.vpc
+            ? `${phone || email || uid} (${site.vpc})`
+            : site.deviceOnly
+              ? phone || email || uid || maskedName(name) || dt.user_id
+              : phone || email || dt.user_id
+        })(),
         uid,
         email,
         name: name || dt.user_name || "",
@@ -450,7 +457,7 @@ async function patSignIn(site, pat) {
     // an account on a new sign-in when both the accountId and the uid match,
     // so a renewed PAT sign-in must keep naming the same account. A suffix
     // here would add a second row beside the lapsed one instead.
-    accountId: accountLabelOf(user, uid, name, email),
+    accountId: phoneLabelOf(user, email, name) || email || uid,
     uid,
     email,
     name: name || "",
@@ -1869,17 +1876,16 @@ function signed(res, renewed) {
   return new Response(res.body, { status: res.status, statusText: res.statusText, headers })
 }
 
-// changed is the fields of b that differ from a's: what auth.refresh gives.
 // ---- the card's name ----------------------------------------------------------
 //
 // `accountId` is what the card shows, and a uuid is not a name. Both phone
 // sign-ins here carry the phone somewhere in their user info: Qoder CN answers
-// `security_mobile` (measured `18970098051`), QwenWork's phone accounts answer
+// `security_mobile` (measured `13800138000`), QwenWork's phone accounts answer
 // only the last four digits as `name` plus a synthetic
 // `phone_<uuid>@phone.local` email (measured).
 const PHONE_EMAIL = /^phone_[0-9a-f-]+@phone\.local$/i
 
-/** A phone number as the cards show it: `0086-…`/`+86 …`/bare → `189****8051`. */
+/** A phone number as the cards show it: `0086-…`/`+86 …`/bare → `138****8000`. */
 function maskPhone(raw) {
   let digits = String(raw ?? "").replace(/\D/g, "")
   if (digits.startsWith("0086") && digits.length - 4 >= 7) digits = digits.slice(4)
@@ -1891,10 +1897,11 @@ function maskPhone(raw) {
 /**
  * The card's name: the phone when the account signed in with one, else a real
  * email, else the name, else the id. A synthetic phone email is never shown —
- * its last four digits are (`****8051`), which is all the vendor gives.
+ * its last four digits are (`****8000`), which is all the vendor gives.
  */
-// One read per token, for the life of the process: the card asks at each
-// renewal, and the account's own name does not change under one token.
+// One read per token, re-read after LABEL_TTL_MS. The map is capped: a long-
+// lived host renews many tokens, and an unbounded map is a slow leak.
+const LABEL_CAP = 2048
 const labelByToken = new Map()
 const LABEL_TTL_MS = 6 * 60 * 60 * 1000
 
@@ -1909,25 +1916,50 @@ async function refreshedLabelOf(site, token, a) {
     if (ui.status < 200 || ui.status >= 300) return ""
     const user = site.normalizeUser ? site.normalizeUser(ui.json) : ui.json
     const label = accountLabelOf(user, a?.uid, a?.name, a?.email)
-    if (label) labelByToken.set(key, { at: Date.now(), label })
+    if (label) {
+      if (labelByToken.size >= LABEL_CAP) {
+        for (const [k, v] of labelByToken) if (Date.now() - v.at >= LABEL_TTL_MS) labelByToken.delete(k)
+        if (labelByToken.size >= LABEL_CAP * 2) labelByToken.clear()
+      }
+      labelByToken.set(key, { at: Date.now(), label })
+    }
     return label
   } catch {
     return ""
   }
 }
 
-function accountLabelOf(user, uid, name, email, dt) {
+// a name can carry the full number (`dsh13800138000` on Qoder CN): mask a run
+// of 7+ digits, or give up on the name rather than print it.
+function maskedName(name) {
+  const n = String(name ?? "")
+  if (!n) return ""
+  const run = n.match(/\d{7,}/)
+  if (!run) return n
+  const m = maskPhone(run[0])
+  return m ? n.replace(run[0], m) : ""
+}
+
+/** The phone-derived part of a card's name, or "" when the account has none. */
+function phoneLabelOf(user, email, name) {
   const phone = maskPhone(user?.security_mobile ?? user?.phoneNumber ?? user?.phone ?? user?.mobile)
   if (phone) return phone
   // a synthetic phone email is never shown: its four digits are, or nothing
-  const synthetic = PHONE_EMAIL.test(String(email ?? ""))
-  if (synthetic) {
+  if (PHONE_EMAIL.test(String(email ?? ""))) {
     const tail = String(name ?? "").trim()
     if (/^\d{4}$/.test(tail)) return `****${tail}`
   }
-  return String(synthetic ? "" : (email ?? "")) || String(name ?? "") || String(uid ?? "") || String(dt?.user_id ?? "")
+  return ""
 }
 
+function accountLabelOf(user, uid, name, email, dt) {
+  const phone = phoneLabelOf(user, email, name)
+  if (phone) return phone
+  const synthetic = PHONE_EMAIL.test(String(email ?? ""))
+  return String(synthetic ? "" : (email ?? "")) || maskedName(name) || String(uid ?? "") || String(dt?.user_id ?? "")
+}
+
+// changed is the fields of b that differ from a's: what auth.refresh gives.
 function changed(a, b) {
   const out = {}
   for (const k of ["access", "refresh", "expires", "deviceToken", "deviceRefresh"]) if (b[k] !== a[k]) out[k] = b[k]
@@ -2977,8 +3009,12 @@ const makePlugin = (site) => async ({ client }) => {
             // version was named by its uuid, and its renewal is where the
             // user info can still be read for the name the card should show
             const next = { ...a, ...(await renew(a)) }
-            const label = await refreshedLabelOf(site, next.access, a)
-            return label ? { ...changed(auth, next), accountId: label } : changed(auth, next)
+            // 账号自己的 site（VPC / enterprise host）—— 公共 site 会把企业 token
+            // 发到公网 host（评审 #487 第 1 点）；后缀也与登录时一致（第 2 点）
+            const s = siteOf(site, a)
+            const label = await refreshedLabelOf(s, next.access, a)
+            const accountId = label ? (s.vpc ? `${label} (${s.vpc})` : label) : ""
+            return accountId ? { ...changed(auth, next), accountId } : changed(auth, next)
           } catch (e) {
             if (e?.expired) throw Object.assign(new Error(e.message), { signIn: "expired" })
             throw e

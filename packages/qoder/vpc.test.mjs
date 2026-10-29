@@ -357,3 +357,34 @@ test("an account whose VPC instance on record isn't one is not sent to the publi
   expect((await hooks.auth.usage(s.get)).error).toContain("isn't one")
   expect(seen).toEqual([])
 })
+
+test("a VPC account's renewal asks its own instance for the name, and keeps the suffix (review #487)", async () => {
+  toServer()
+  const at = []
+  route = (where, { req }) => {
+    at.push(where)
+    if (where === OPENAPI + "/api/v1/jobToken/refresh")
+      return json({ token: "jt-vpc-2", refresh_token: "jrt-vpc-2", expires_in: 86400000 })
+    if (where === OPENAPI + "/api/v1/userinfo") {
+      expect(req.headers.get("authorization")).toBe("Bearer jt-vpc-2")
+      return json({ id: "u-vpc", name: "Alice", security_mobile: "13800138000" })
+    }
+    return new Response("", { status: 404 })
+  }
+  const hooks = await QoderCNAuthPlugin({ client: store().client })
+  const got = await hooks.auth.refresh({
+    type: "oauth",
+    access: "jt-vpc-1",
+    refresh: "jrt-vpc-1",
+    uid: "u-vpc",
+    vpc: "acme",
+    accountId: "alice@corp.example (acme)",
+    expires: Date.now() + 1_000,
+  })
+  // 后缀与登录时一致，否则同一个人会在卡片上变成两行
+  expect(got.accountId).toBe("138****8000 (acme)")
+  // 并且一次都没碰公网 host：企业 token 不发到 openapi.qoder.com.cn
+  expect(at.some((w) => w.startsWith(OPENAPI))).toBe(true)
+  expect(at.some((w) => w.startsWith("openapi.qoder.com.cn"))).toBe(false)
+  expect(at.some((w) => PUBLIC.some((p) => w.startsWith(p)))).toBe(false)
+})

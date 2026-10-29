@@ -40,7 +40,7 @@ function serve(site, { job, device } = {}) {
       return device ? device(token) : json({ device_token: "dt-2", refresh_token: "drt-2", expires_at: new Date(Date.now() + 7_200_000).toISOString() })
     // the card's name: a renewal reads the user info once (the phone it shows)
     if (u.host === site.openapi && u.pathname === "/api/v1/userinfo")
-      return json({ id: "u1", name: "one@x", security_mobile: "18970098051" })
+      return json({ id: "u1", name: "one@x", security_mobile: "13800138000" })
     return new Response("", { status: 500 })
   }
   return calls
@@ -64,7 +64,7 @@ for (const site of SITES) {
     // the renewal also names the account (the phone, not its uuid), so an
     // account stored by an earlier version is renamed here
     expect(Object.keys(got).sort()).toEqual(["access", "accountId", "expires", "refresh"])
-    expect(got.accountId).toBe("189****8051")
+    expect(got.accountId).toBe("138****8000")
     expect(got.expires).toBeGreaterThan(Date.now() + 3_000_000)
     expect(sets).toEqual([])
     expect(calls.filter((c) => c.includes("Token/refresh"))).toEqual([`${site.openapi}/api/v1/jobToken/refresh jrt-1`])

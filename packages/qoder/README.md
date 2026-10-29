@@ -304,12 +304,12 @@ The hosts and reply shapes come from a real VPC account's report
 
 ## The card's name
 
-An account signed in with a phone is shown by that phone — masked, `189****8051` — not by
+An account signed in with a phone is shown by that phone — masked, `138****8000` — not by
 the uuid its sign-in carries. Qoder CN's user info answers the number as `security_mobile`
-(measured `18970098051`), so that is what the card takes.
+(measured `13800138000`), so that is what the card takes.
 
 QwenWork's phone accounts answer only the last four digits, as `name`, beside a synthetic
-`phone_<uuid>@phone.local` email (measured): the card shows `****8051` and never that email.
+`phone_<uuid>@phone.local` email (measured): the card shows `****8000` and never that email.
 An email sign-in keeps its email.
 
 `uid` stays the vendor's own id (it is what tells two accounts apart), and a renewal reads
