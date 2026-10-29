@@ -13,9 +13,7 @@ OpenCode & Magpie provider plugin for **SenseTime Raccoon (商汤小浣熊, `xia
 - **Usage & allowances**: reports available credits, unexpired grant bills, daily expiration timestamps, and Pro/Free subscription plans.
 - **Daily check-in & desktop onboarding grant**: supports Magpie automatic daily check-in (`+300` credits/day) and one-time desktop onboarding grant (`+3000` credits).
 - **SSE model rewrite**: transparently rewrites internal upstream model names back to requested downstream models for client compatibility.
-- **The card's name**: the account's own phone number (`138****8000`), read once per token from `/api/web/auth/v1/user_info` with the JWT the sign-in holds. The JWT names the signer only by `Raccoon-pu-<uuid>` — an id, not a name — which is what the card used to show. `uid` stays that id (it is what tells two accounts apart); a renewal puts the phone on an account stored by an earlier version, and a failed read leaves the JWT's name on the card rather than costing a sign-in.
-
-  **Upgrading from 0.1.4:** an account stored by an earlier version is named `Raccoon-pu-<uuid>`; its next renewal puts the phone on it. An account whose renewal had lapsed and that is signed in again comes back with a different `accountId` (the phone) — magpie's host replaces an account on a new sign-in only when `accountId` matches, so it appears as a second row beside the old one. Delete the old row.
+- **The card's name**: the account's own phone number (`138****8000`), read once per token from `/api/web/auth/v1/user_info` with the JWT the sign-in holds. `accountId` stays the account's identity (the JWT's `Raccoon-pu-<uuid>`, or the desktop app's name) — magpie keys the user's own name for the account, its proxy, model picks and a gateway key's list by it, so it never changes. The card shows usage's `user`, which is the phone once a sign-in or renewal has read it. A failed read changes nothing and never costs a sign-in.
 
 ## 中文
 

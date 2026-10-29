@@ -13,8 +13,10 @@ function fakeJwt(claims) {
 let server = null
 let tempDir = null
 
-// 任何用例都不许碰真实网络：没有 startServer() 的用例指向一个不监听的端口。
-// （accountPhoneOf 会读 user_info；指向真站会让整套测试依赖外网，评审 #486 第 1 条。）
+// No test may reach the real network: a test that starts no server points at a
+// port nothing listens on.
+// (accountPhoneOf reads user_info; pointing at the real site made the suite
+// depend on the network — review #486, point 1.)
 beforeEach(() => {
   process.env.RACCOON_MAIN_SITE_URL = "http://127.0.0.1:9"
 })
@@ -194,7 +196,7 @@ test("a desktop seat is named by its phone, not by the app's `name`", async () =
   const flow = await method.authorize()
   const res = await flow.callback()
   expect(res.type).toBe("success")
-  // accountId 保持 main 的算法（app 的 name），手机号只是记录上的一个字段
+  // accountId stays main's computation (the app's name); the phone is a record field
   expect(res.accountId).toBe("raccoon-pu-01a1365c")
   expect(res.phone).toBe("138****8000")
   expect(res.cardName).toBe("138****8000")
@@ -690,7 +692,7 @@ test("a uid-less desktop seat takes the app's newer token for the same account (
   const hooks = await RaccoonAuthPlugin({ client: {} })
   const seat = await (await hooks.auth.methods[1].authorize()).callback()
   expect(seat.uid).toBe("")
-  // 同一个账号（名字一致），app 换了一把更新的 token
+  // the same account (same name); the app now holds a newer token
   const newer = fakeJwt({ name: "NoUid", exp: Math.floor(Date.now() / 1000) + 7200 })
   writeFileSync(authFile, JSON.stringify({ access_token: newer, refresh_token: "D2" }))
   startServer({
@@ -1092,4 +1094,32 @@ test("X-Client-Platform header derives desktop-mac on darwin and desktop-windows
   } finally {
     if (origDesc) Object.defineProperty(process, "platform", origDesc)
   }
+})
+
+test("a 0.1.4-style record keeps its accountId on renewal and shows the phone (review #486, 3)", async () => {
+  tempDir = mkdtempSync(join(tmpdir(), "raccoon-test-"))
+  process.env.RACCOON_BOX_AGENT_CONFIG_DIR = tempDir
+  startServer({
+    "POST /api/web/auth/v1/refresh": () =>
+      Response.json({ code: 0, data: { access_token: "new-tok", refresh_token: "rt-new", expires_in: 86400 } }),
+    "/api/web/auth/v1/user_info": () => Response.json({ code: 0, data: { phone: "13800138000", name: "RaccoonBenjamin" } }),
+    "GET /api/web/points/v1/balance": () => Response.json({ code: 0, data: { available_points: 100 } }),
+    "GET /api/web/auth/v1/entitlement_info": () => Response.json({ code: 0, data: {} }),
+    "GET /api/web/points/v1/bills": () => Response.json({ code: 0, data: { items: [] } }),
+  })
+  const hooks = await RaccoonAuthPlugin({ client: {} })
+  const old = {
+    type: "oauth",
+    access: "old-tok",
+    refresh: "rt-old",
+    expires: Date.now() + 1_000,
+    accountId: "Raccoon-pu-abc123",
+    uid: "7615755",
+  }
+  const renewed = await hooks.auth.refresh(old)
+  // 身份不动：续期不给 accountId
+  expect(renewed.accountId).toBeUndefined()
+  expect(renewed.cardName).toBe("138****8000")
+  const u = await hooks.auth.usage(async () => ({ ...old, ...renewed, access: "new-tok", expires: Date.now() + 86_400_000 }))
+  expect(u.user).toBe("138****8000")
 })

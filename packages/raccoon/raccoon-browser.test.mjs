@@ -2,8 +2,10 @@ import { afterEach, beforeEach, expect, test } from "bun:test"
 import { RaccoonAuthPlugin, _internal } from "./index.mjs"
 
 let upstream
-// 任何用例都不许碰真实网络：没有 startServer() 的用例指向一个不监听的端口。
-// （accountPhoneOf 会读 user_info；指向真站会让整套测试依赖外网，评审 #486 第 1 条。）
+// No test may reach the real network: a test that starts no server points at a
+// port nothing listens on.
+// (accountPhoneOf reads user_info; pointing at the real site made the suite
+// depend on the network — review #486, point 1.)
 beforeEach(() => {
   process.env.RACCOON_MAIN_SITE_URL = "http://127.0.0.1:9"
 })
@@ -59,7 +61,9 @@ test("browser authorization returns automatically and completes the code exchang
   expect(page).not.toContain("synthetic-refresh")
   const signedIn = await done
   expect(signedIn.type).toBe("success")
-  // `accountId` is the phone, `uid` is the id the JWT names
+  // accountId is the identity — `Raccoon-<uid>` when the JWT names no one —
+  // and the phone is only the name the card shows
+  expect(signedIn.accountId).toMatch(/^Raccoon-\d+$/)
   expect(signedIn.phone).toBe("138****8000")
   expect(signedIn.cardName).toBe("138****8000")
   expect(calls).toBe(1)

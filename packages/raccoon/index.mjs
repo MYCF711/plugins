@@ -870,7 +870,8 @@ async function toSuccessAuth(access, refresh, extra = {}) {
     expires,
     // accountId is the account's identity in magpie (its user-set name, proxy,
     // model picks and a gateway key's list hang off it), so it stays what main
-    // computes; the phone is a separate field the card shows.
+    // computes; the phone is a separate field (`phone`, `cardName`) that usage
+    // shows as the card's name.
     accountId: name || (uid ? `Raccoon-${uid}` : PROVIDER_NAME),
     ...(phone ? { phone, cardName: phone } : {}),
     uid: uid || "",
@@ -1047,7 +1048,7 @@ export const RaccoonAuthPlugin = async ({ client }) => {
       provider: PROVIDER_ID,
       refreshLead: LEAD_MS,
       async refresh(auth) {
-        if (auth?.type !== "oauth" || !auth.access) return undefined
+        if (auth?.type !== "oauth" || !auth.access || auth.source === "desktop") return undefined
         if (!auth.refresh) return undefined
         const { a, didRenew } = await currentAuth(client, auth, true)
         if (!didRenew) return undefined
@@ -1154,7 +1155,7 @@ export const RaccoonAuthPlugin = async ({ client }) => {
             ...result,
             // The card's name: the phone when the record has one, else what
             // the account is called (an older record has no phone).
-            user: auth.cardName || auth.accountId || a.name || a.uid,
+            user: a.cardName || a.accountId || a.name || a.uid,
             signIn: didRenew ? "renewed" : "kept",
           }
         } catch (e) {
