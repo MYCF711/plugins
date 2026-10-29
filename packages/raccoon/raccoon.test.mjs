@@ -172,6 +172,27 @@ test("desktop sign-in is read-only and never writes or refreshes auth.json", asy
   expect(await Bun.file(authFile).text()).toBe(originalContent)
 })
 
+test("a desktop seat is named by its phone, not by the app's `name`", async () => {
+  tempDir = mkdtempSync(join(tmpdir(), "raccoon-test-"))
+  process.env.RACCOON_BOX_AGENT_CONFIG_DIR = tempDir
+  writeFileSync(join(tempDir, "auth.json"), JSON.stringify({
+    access_token: fakeJwt({ iss: "74350b", name: "raccoon-pu-01a1365c", exp: Math.floor(Date.now() / 1000) + 3600 }),
+    refresh_token: "D1",
+  }))
+  startServer({
+    "/api/web/auth/v1/user_info": () => Response.json({ code: 0, data: { phone: "18170800632", name: "RaccoonBenjamin" } }),
+  })
+
+  const hooks = await RaccoonAuthPlugin({ client: {} })
+  const method = hooks.auth.methods.find((m) => m.label?.includes("desktop") || m.label?.includes("桌面"))
+  const flow = await method.authorize()
+  const res = await flow.callback()
+  expect(res.type).toBe("success")
+  expect(res.accountId).toBe("181****0632")
+  expect(res.phone).toBe("181****0632")
+  expect(res.uid).toBeTruthy()
+})
+
 // Where Raccoon desktop 1.1.3 keeps auth.json, read from its app.asar:
 // clientProfile.ts puts the box-agent home at <profile>/agent, the profile at
 // app.getPath("appData")/office-raccoon on macOS and at ~/.office-raccoon on

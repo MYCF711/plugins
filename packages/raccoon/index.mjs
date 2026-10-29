@@ -966,14 +966,18 @@ function desktopSignIn() {
       if (isStale(d, EARLY_MS)) {
         return { type: "failed", error: "商汤小浣熊桌面端登录态已过期，请先打开商汤小浣熊客户端重新登录" }
       }
+      // the app's own token reads the phone too, so a seat added here is named
+      // like one signed in through the browser
+      const phone = await accountPhoneOf(d.access)
       return {
         type: "success",
         access: d.access,
         refresh: "",
         expires: d.expires,
         source: "desktop",
-        accountId: d.name || PROVIDER_NAME,
+        accountId: phone || d.name || PROVIDER_NAME,
         uid: d.uid || "",
+        ...(phone ? { phone } : {}),
       }
     },
   }
@@ -1021,7 +1025,15 @@ export const RaccoonAuthPlugin = async ({ client }) => {
       provider: PROVIDER_ID,
       refreshLead: LEAD_MS,
       async refresh(auth) {
-        if (auth?.type !== "oauth" || auth.source === "desktop" || !auth.access || !auth.refresh) return undefined
+        if (auth?.type !== "oauth" || !auth.access) return undefined
+        // A desktop seat is never renewed (its token is the app's own), but a
+        // card stored by an earlier version can still be renamed: the phone is
+        // one read away, and magpie merges what this returns into the account.
+        if (auth.source === "desktop") {
+          const phone = await accountPhoneOf(auth.access)
+          return phone ? { accountId: phone, phone } : undefined
+        }
+        if (!auth.refresh) return undefined
         const { a, didRenew } = await currentAuth(client, auth, true)
         if (!didRenew) return undefined
         // An account stored by an older version was named by `Raccoon-pu-…`;
