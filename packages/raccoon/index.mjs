@@ -99,8 +99,8 @@ function extractDisplayName(claims) {
 // ---- the card's name --------------------------------------------------------
 
 /**
- * A phone number as the cards show it: `86 18170800632` / `0086-…` / bare /
- * already masked → `181****0632`.
+ * A phone number as the cards show it: `86 13800138000` / `0086-…` / bare /
+ * already masked → `138****8000`.
  */
 function maskPhone(raw) {
   let digits = String(raw ?? "").replace(/\D/g, "")
@@ -110,15 +110,15 @@ function maskPhone(raw) {
   return `${digits.slice(0, 3)}****${digits.slice(-4)}`
 }
 
-// One read per token, for the life of the process: the phone does not change,
-// and both a sign-in and every renewal ask (the same token while it lasts).
+// One read per token, re-read after PHONE_TTL_MS: the phone does not change,
+// but the map must not grow for the life of the host.
 const phoneByToken = new Map()
 const PHONE_TTL_MS = 6 * 60 * 60 * 1000
 
 /**
  * The account's own phone number, read from the web API with the token the
  * sign-in already holds (`GET /api/web/auth/v1/user_info` answers `data.phone`,
- * measured `18170800632` on an `sms`-registered account).
+ * measured `13800138000` on an `sms`-registered account).
  *
  * The JWT names the signer only by `Raccoon-pu-<uuid>` — an id, not a name —
  * so the card used to show that string. Best effort: no token, a refusal or an
@@ -307,7 +307,10 @@ function isStale(a, marginMs = EARLY_MS) {
 function sameAccount(seat, read) {
   if (!read) return false
   if (seat?.uid) return !!read.uid && String(seat.uid) === String(read.uid)
-  if (seat?.accountId) return !!read.name && String(seat.accountId) === String(read.name)
+  // ⚠ 不能用 accountId 比：登录后它已经是手机号（138****8000），永远不匹配
+  //   app 的 name。记录上那个名字字段（JWT / app 给的）才是同一个来源。
+  const seatName = seat?.name ?? seat?.accountId
+  if (seatName) return !!read.name && String(seatName) === String(read.name)
   return true
 }
 
@@ -317,12 +320,17 @@ async function currentAuth(client, auth, force = false) {
     // the app holds this seat's account: its token is the newest there is,
     // and a seat asked again after a refusal takes it
     if (sameAccount(auth, d) && !isStale(d, EARLY_MS)) {
+      let next = { ...auth, ...d }
       if (d.access && d.access !== auth.access) {
+        // 老版本存下的桌面 seat 名字是 `Raccoon-pu-…`：app 换了 token 时顺手把
+        // 手机号读上，存在这里（magpie 只在登录时替换账号，续期只合并字段）。
+        const phone = await accountPhoneOf(d.access)
+        if (phone) next = { ...next, accountId: phone, phone }
         try {
-          await client?.auth?.set?.({ path: { id: PROVIDER_ID }, body: { ...auth, ...d } })
+          await client?.auth?.set?.({ path: { id: PROVIDER_ID }, body: next })
         } catch {}
       }
-      return { a: { ...auth, ...d }, didRenew: false }
+      return { a: next, didRenew: false }
     }
     // the app holds another account, or none: this seat goes on with the
     // token it was signed in with until that token ends
@@ -1026,13 +1034,6 @@ export const RaccoonAuthPlugin = async ({ client }) => {
       refreshLead: LEAD_MS,
       async refresh(auth) {
         if (auth?.type !== "oauth" || !auth.access) return undefined
-        // A desktop seat is never renewed (its token is the app's own), but a
-        // card stored by an earlier version can still be renamed: the phone is
-        // one read away, and magpie merges what this returns into the account.
-        if (auth.source === "desktop") {
-          const phone = await accountPhoneOf(auth.access)
-          return phone ? { accountId: phone, phone } : undefined
-        }
         if (!auth.refresh) return undefined
         const { a, didRenew } = await currentAuth(client, auth, true)
         if (!didRenew) return undefined
@@ -1137,7 +1138,9 @@ export const RaccoonAuthPlugin = async ({ client }) => {
           }
           return {
             ...result,
-            user: a.name || auth.accountId || a.uid,
+            // 卡片名：auth.accountId 在登录后就是手机号，先于 JWT 的 name/uid；
+            // 老账号（名字是 Raccoon-pu-…）没有 phone，仍显示原来那个名字。
+            user: auth.phone || auth.accountId || a.name || a.uid,
             signIn: didRenew ? "renewed" : "kept",
           }
         } catch (e) {

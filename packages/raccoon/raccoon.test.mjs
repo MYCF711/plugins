@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test"
+import { afterEach, beforeEach, expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
@@ -12,6 +12,12 @@ function fakeJwt(claims) {
 
 let server = null
 let tempDir = null
+
+// 任何用例都不许碰真实网络：没有 startServer() 的用例指向一个不监听的端口。
+// （accountPhoneOf 会读 user_info；指向真站会让整套测试依赖外网，评审 #486 第 1 条。）
+beforeEach(() => {
+  process.env.RACCOON_MAIN_SITE_URL = "http://127.0.0.1:9"
+})
 
 afterEach(() => {
   server?.stop(true)
@@ -180,7 +186,7 @@ test("a desktop seat is named by its phone, not by the app's `name`", async () =
     refresh_token: "D1",
   }))
   startServer({
-    "/api/web/auth/v1/user_info": () => Response.json({ code: 0, data: { phone: "18170800632", name: "RaccoonBenjamin" } }),
+    "/api/web/auth/v1/user_info": () => Response.json({ code: 0, data: { phone: "13800138000", name: "RaccoonBenjamin" } }),
   })
 
   const hooks = await RaccoonAuthPlugin({ client: {} })
@@ -188,8 +194,8 @@ test("a desktop seat is named by its phone, not by the app's `name`", async () =
   const flow = await method.authorize()
   const res = await flow.callback()
   expect(res.type).toBe("success")
-  expect(res.accountId).toBe("181****0632")
-  expect(res.phone).toBe("181****0632")
+  expect(res.accountId).toBe("138****8000")
+  expect(res.phone).toBe("138****8000")
   expect(res.uid).toBeTruthy()
 })
 
@@ -275,6 +281,31 @@ test("usage does not invent 300/9000 floors when bills do not cover balance", as
   }))
   expect(u.balance).toBe("500 credits")
   expect(u.windows).toEqual([])
+})
+
+test("the name usage puts on the card is the phone, not the JWT's name (review #486)", async () => {
+  const validTok = fakeJwt({ iss: "74350b", name: "RaccoonBenjamin", exp: Math.floor(Date.now() / 1000) + 3600 })
+  startServer({
+    "GET /api/web/points/v1/balance": () =>
+      Response.json({
+        code: 0,
+        data: { available_points: 500, daily_points: 0, reward_points: 500, monthly_points: 0, topup_points: 0 },
+      }),
+    "GET /api/web/auth/v1/entitlement_info": () => Response.json({ code: 0, data: {} }),
+    "GET /api/web/points/v1/bills": () => Response.json({ code: 0, data: { items: [] } }),
+  })
+  const hooks = await RaccoonAuthPlugin({ client: {} })
+  // magpie 用 usage 的 user 覆盖卡片名；JWT 的 name 也在记录里，手机号必须赢
+  const u = await hooks.auth.usage(async () => ({
+    type: "oauth",
+    access: validTok,
+    refresh: "rt1",
+    expires: Date.now() + 3600_000,
+    accountId: "138****8000",
+    phone: "138****8000",
+    name: "RaccoonBenjamin",
+  }))
+  expect(u.user).toBe("138****8000")
 })
 
 test("usage reports Credits window when unexpired bills account for total granted", async () => {
