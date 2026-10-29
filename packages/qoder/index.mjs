@@ -394,17 +394,25 @@ async function deviceSignIn(site) {
         ...chat,
         // a VPC account is told apart from the same person's public one; a
         // device-only one is shown by name, falling back to its id
-        accountId: (() => {
-          // A real email comes first, then the phone: an email account may have
-          // a phone bound to it, and renaming it to that phone would make a new
-          // row (review #487, B). A synthetic phone email is never a name.
-          const named =
-            realEmailOf(email) || phoneLabelOf(user, email, name) || (PHONE_EMAIL.test(String(email ?? "")) ? "" : String(email ?? ""))
-          return site.vpc
-            ? `${named || uid} (${site.vpc})`
-            : site.deviceOnly
-              ? named || uid || maskedName(name) || dt.user_id
-              : named || dt.user_id
+        // accountId is the account's identity in magpie (its name, proxy,
+        // model picks and caps all hang off it, and a gateway key keys its
+        // list by it), so it stays exactly what main computes: the phone is a
+        // separate field, shown by usage's `user`, never the identity.
+        accountId: site.vpc
+          ? `${email || uid} (${site.vpc})`
+          : site.deviceOnly
+            ? email || uid || name || dt.user_id
+            : email || dt.user_id,
+        phoneLabel: (() => {
+          const label = phoneLabelOf(user, email, name)
+          return label ? (site.vpc ? `${label} (${site.vpc})` : label) : ""
+        })(),
+        // the card's name, what magpie shows: a real email first, then the
+        // phone (review #487, B) — never the accountId
+        cardName: (() => {
+          const label = phoneLabelOf(user, email, name)
+          const named = realEmailOf(email) || label
+          return named ? (site.vpc ? `${named} (${site.vpc})` : named) : ""
         })(),
         uid,
         email,
@@ -459,7 +467,9 @@ async function patSignIn(site, pat) {
     // an account on a new sign-in when both the accountId and the uid match,
     // so a renewed PAT sign-in must keep naming the same account. A suffix
     // here would add a second row beside the lapsed one instead.
-    accountId: realEmailOf(email) || phoneLabelOf(user, email, name) || uid,
+    accountId: email || uid,
+    phoneLabel: phoneLabelOf(user, email, name),
+    cardName: realEmailOf(email) || phoneLabelOf(user, email, name),
     uid,
     email,
     name: name || "",
@@ -1892,7 +1902,8 @@ function maskPhone(raw) {
   let digits = String(raw ?? "").replace(/\D/g, "")
   if (digits.startsWith("0086") && digits.length - 4 >= 7) digits = digits.slice(4)
   else if (digits.startsWith("86") && digits.length - 2 >= 7) digits = digits.slice(2)
-  if (digits.length < 7) return ""
+  // a phone is 11 digits; a shorter run is not a number to mask
+  if (digits.length < 11) return ""
   return `${digits.slice(0, 3)}****${digits.slice(-4)}`
 }
 
@@ -1905,14 +1916,15 @@ function maskPhone(raw) {
  * Read from the renewed token's user info. No cache: each renewal has a new
  * token, so nothing is read twice (review #487, 6).
  */
-async function refreshedOwnLabelOf(site, token) {
+async function refreshedPhoneLabelOf(site, token) {
   const key = String(token ?? "")
   if (!key) return ""
   try {
     const ui = await openapi(site, site.userInfoPath ?? "/api/v1/userinfo", { token: key })
     if (ui.status < 200 || ui.status >= 300) return ""
     const user = site.normalizeUser ? site.normalizeUser(ui.json) : ui.json
-    return realEmailOf(user?.email) || phoneLabelOf(user, user?.email, user?.name)
+    const label = phoneLabelOf(user, user?.email, user?.name)
+    return label ? (site.vpc ? `${label} (${site.vpc})` : label) : ""
   } catch {
     return ""
   }
@@ -2696,6 +2708,8 @@ const makePlugin = (site) => async ({ client }) => {
     try {
       const cred = await fresh(getAuth)
       if (renewed(cred)) signIn = "renewed"
+      // the card's name: magpie takes usage's `user` for it and never as a key
+      const who = cred?.cardName ? { user: cred.cardName } : {}
       // a site with its own usage path (QwenWork's account-context, signed
       // like any other call and answered with its own envelope) is read
       // there; a 401 rotates the device token once, as the qoder path does
@@ -2726,7 +2740,7 @@ const makePlugin = (site) => async ({ client }) => {
         if (site.walletsPath && ctxUser?.is_biz !== true && ctxUser?.isBiz !== true) {
           try { wallets = await read(token, site.walletsPath) } catch {}
         }
-        return { ...(site.parseUsage ? site.parseUsage(env, wallets) : { windows: [] }), signIn }
+        return { ...(site.parseUsage ? site.parseUsage(env, wallets) : { windows: [] }), signIn, ...who }
       }
       // A PAT account has no device token: the usage endpoint takes the job
       // token the exchange gave — a live PAT account answered 200 with a
@@ -2734,7 +2748,7 @@ const makePlugin = (site) => async ({ client }) => {
       // no second token here to rotate and retry with.
       if (cred.patAuth && !cred.deviceToken) {
         const env = await fetchUsage(siteOf(site, cred), cred.access)
-        return { ...(await spareFree(cred, parseUsage(env))), signIn }
+        return { ...(await spareFree(cred, parseUsage(env))), signIn, ...who }
       }
       let env
       try {
@@ -2743,7 +2757,7 @@ const makePlugin = (site) => async ({ client }) => {
         if (!(e instanceof UsageStatus) || (e.status !== 401 && e.status !== 403)) throw e
         env = await fetchUsage(siteOf(site, cred), await deviceToken(getAuth, cred.deviceToken))
       }
-      return { ...(await spareFree(cred, parseUsage(env))), signIn }
+      return { ...(await spareFree(cred, parseUsage(env))), signIn, ...who }
     } catch (e) {
       return { error: e?.message ?? String(e), signIn: e?.expired ? "expired" : signIn }
     }
@@ -3016,9 +3030,8 @@ const makePlugin = (site) => async ({ client }) => {
         // to the public hosts (1), and the suffix must match the sign-in (2).
         try {
           const s = siteOf(site, out.next)
-          const label = await refreshedOwnLabelOf(s, out.next.access)
-          const accountId = label ? (s.vpc ? `${label} (${s.vpc})` : label) : ""
-          return accountId ? { ...fields, accountId } : fields
+          const phoneLabel = await refreshedPhoneLabelOf(s, out.next.access)
+          return phoneLabel ? { ...fields, phoneLabel, cardName: phoneLabel } : fields
         } catch {
           return fields
         }

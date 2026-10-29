@@ -381,8 +381,9 @@ test("a VPC account's renewal asks its own instance for the name, and keeps the 
     accountId: "alice@corp.example (acme)",
     expires: Date.now() + 1_000,
   })
-  // 后缀与登录时一致，否则同一个人会在卡片上变成两行
-  expect(got.accountId).toBe("138****8000 (acme)")
+  // accountId 不动（它是身份），手机号只落在 phoneLabel 上
+  expect(got.accountId).toBeUndefined()
+  expect(got.phoneLabel).toBe("138****8000 (acme)")
   // 并且一次都没碰公网 host：企业 token 不发到 openapi.qoder.com.cn
   expect(at.some((w) => w.startsWith(OPENAPI))).toBe(true)
   expect(at.some((w) => w.startsWith("openapi.qoder.com.cn"))).toBe(false)

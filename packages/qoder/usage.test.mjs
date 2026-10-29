@@ -564,3 +564,17 @@ test("a free account with no credits shows none left, not nothing", () => {
   expect(_internal.parseUsage({ displayMode: "qoder", qoderUsage: { userType: "personal_standard", userQuota: { total: "0" } } }).windows).toEqual([])
   expect(_internal.parseUsage({ displayMode: "qoder", qoderUsage: { userType: "personal_standard" } }).windows).toEqual([])
 })
+
+test("usage's user is the card's name, and the accountId stays the identity (review #487, round 3)", async () => {
+  let auth = { ...account(), accountId: "one@x", cardName: "138****8000", phoneLabel: "138****8000" }
+  globalThis.fetch = async (url) => {
+    const u = new URL(String(url))
+    if (u.pathname === "/sash/api/v2/me/usage") return json(USAGE)
+    if (u.pathname === "/api/v1/deviceToken/refresh") return json({ token: "dt-new", refresh_token: "drt-new" })
+    return new Response("", { status: 404 })
+  }
+  const hooks = await QoderAuthPlugin({ client: { auth: { set: async ({ body }) => (auth = body) } } })
+  const u = await hooks.auth.usage(async () => auth)
+  expect(u.user).toBe("138****8000")
+  expect(auth.accountId).toBe("one@x")
+})

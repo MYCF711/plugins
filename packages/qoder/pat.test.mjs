@@ -359,6 +359,7 @@ test("qoder-cn: an email account with a phone bound keeps its email, here and on
   const pat = hooks.auth.methods.find((m) => m.label?.includes("PAT"))
   const first = await pat.authorize({ pat: "pt-e" }).callback()
   expect(first.accountId).toBe("bob@example.com")
+  expect(first.cardName).toBe("bob@example.com")
   const renewed = await hooks.auth.refresh({ ...first, type: "oauth", expires: Date.now() + 1_000 })
-  expect(renewed.accountId).toBe("bob@example.com")
+  expect(renewed.accountId).toBeUndefined()
 })

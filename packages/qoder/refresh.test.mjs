@@ -63,8 +63,8 @@ for (const site of SITES) {
     expect(got).toMatchObject({ access: "jt-2", refresh: "jrt-2" })
     // the renewal also names the account (the phone, not its uuid), so an
     // account stored by an earlier version is renamed here
-    expect(Object.keys(got).sort()).toEqual(["access", "accountId", "expires", "refresh"])
-    expect(got.accountId).toBe("138****8000")
+    expect(Object.keys(got).sort()).toEqual(["access", "cardName", "expires", "phoneLabel", "refresh"])
+    expect(got.phoneLabel).toBe("138****8000")
     expect(got.expires).toBeGreaterThan(Date.now() + 3_000_000)
     expect(sets).toEqual([])
     expect(calls.filter((c) => c.includes("Token/refresh"))).toEqual([`${site.openapi}/api/v1/jobToken/refresh jrt-1`])

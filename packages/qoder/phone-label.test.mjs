@@ -12,18 +12,19 @@ test("maskPhone: 0086- / +86 / bare / already masked, always 3+4", () => {
   expect(x.maskPhone("0086-13800138000")).toBe("138****8000")
   expect(x.maskPhone("+86 138 0013 8000")).toBe("138****8000")
   expect(x.maskPhone("13800138000")).toBe("138****8000")
-  expect(x.maskPhone("139****1234")).toBe("139****1234")
+  // already masked → fewer than 11 digits → not a number to mask again
+  expect(x.maskPhone("139****1234")).toBe("")
   // not a number → empty, so the label falls through to the next candidate
   expect(x.maskPhone("")).toBe("")
   expect(x.maskPhone(undefined)).toBe("")
   expect(x.maskPhone("123")).toBe("")
   // a number that merely starts with 86 is not a country code either
-  expect(x.maskPhone("86123456789")).toBe("123****6789")
+  expect(x.maskPhone("86123456789")).toBe("")
 })
 
 test("accountLabelOf: a name carrying the whole number is masked (review #487, E)", () => {
   expect(x.accountLabelOf({ id: "u", name: "dsh13800138000" }, "u", "dsh13800138000", "")).toBe("dsh138****8000")
-  expect(x.maskedName("1234567")).toBe("123****4567")
+  expect(x.maskedName("1234567")).toBe("")
   expect(x.maskedName("user12345")).toBe("user12345")
   expect(x.maskedName("Bob")).toBe("Bob")
 })
