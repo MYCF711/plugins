@@ -106,12 +106,14 @@ function maskPhone(raw) {
   let digits = String(raw ?? "").replace(/\D/g, "")
   if (digits.startsWith("0086") && digits.length - 4 >= 7) digits = digits.slice(4)
   else if (digits.startsWith("86") && digits.length - 2 >= 7) digits = digits.slice(2)
-  if (digits.length < 7) return ""
+  // a phone is 11 digits; a shorter run is not a number to mask
+  if (digits.length < 11) return ""
   return `${digits.slice(0, 3)}****${digits.slice(-4)}`
 }
 
-// One read per token, re-read after PHONE_TTL_MS: the phone does not change,
-// but the map must not grow for the life of the host.
+// One read per token, re-read after PHONE_TTL_MS; stale entries are dropped
+// when the map passes PHONE_CAP, so it does not grow for the life of the host.
+const PHONE_CAP = 2048
 const phoneByToken = new Map()
 const PHONE_TTL_MS = 6 * 60 * 60 * 1000
 
@@ -138,7 +140,13 @@ async function accountPhoneOf(access) {
     if (!res.ok) return ""
     const payload = await res.json().catch(() => null)
     const phone = maskPhone(payload?.data?.phone)
-    if (phone) phoneByToken.set(token, { at: Date.now(), phone })
+    if (phone) {
+      if (phoneByToken.size >= PHONE_CAP) {
+        for (const [k, v] of phoneByToken) if (Date.now() - v.at >= PHONE_TTL_MS) phoneByToken.delete(k)
+        if (phoneByToken.size >= PHONE_CAP * 2) phoneByToken.clear()
+      }
+      phoneByToken.set(token, { at: Date.now(), phone })
+    }
     return phone
   } catch {
     return ""
@@ -307,10 +315,9 @@ function isStale(a, marginMs = EARLY_MS) {
 function sameAccount(seat, read) {
   if (!read) return false
   if (seat?.uid) return !!read.uid && String(seat.uid) === String(read.uid)
-  // ⚠ 不能用 accountId 比：登录后它已经是手机号（138****8000），永远不匹配
-  //   app 的 name。记录上那个名字字段（JWT / app 给的）才是同一个来源。
-  const seatName = seat?.name ?? seat?.accountId
-  if (seatName) return !!read.name && String(seatName) === String(read.name)
+  // accountId is the identity, as on main: the seat's own name is what the
+  // app's read carries for the same account.
+  if (seat?.accountId) return !!read.name && String(seat.accountId) === String(read.name)
   return true
 }
 
@@ -322,10 +329,12 @@ async function currentAuth(client, auth, force = false) {
     if (sameAccount(auth, d) && !isStale(d, EARLY_MS)) {
       let next = { ...auth, ...d }
       if (d.access && d.access !== auth.access) {
-        // 老版本存下的桌面 seat 名字是 `Raccoon-pu-…`：app 换了 token 时顺手把
-        // 手机号读上，存在这里（magpie 只在登录时替换账号，续期只合并字段）。
+        // A desktop seat stored by an earlier version is named `Raccoon-pu-…`:
+        // when the app's token changes, read the phone and keep it on the
+        // record (magpie replaces an account only at sign-in, merging fields
+        // on renewal).
         const phone = await accountPhoneOf(d.access)
-        if (phone) next = { ...next, accountId: phone, phone }
+        if (phone) next = { ...next, phone, cardName: phone }
         try {
           await client?.auth?.set?.({ path: { id: PROVIDER_ID }, body: next })
         } catch {}
@@ -859,7 +868,11 @@ async function toSuccessAuth(access, refresh, extra = {}) {
     access,
     refresh: refresh || "",
     expires,
-    accountId: phone || name || (uid ? `Raccoon-${uid}` : PROVIDER_NAME),
+    // accountId is the account's identity in magpie (its user-set name, proxy,
+    // model picks and a gateway key's list hang off it), so it stays what main
+    // computes; the phone is a separate field the card shows.
+    accountId: name || (uid ? `Raccoon-${uid}` : PROVIDER_NAME),
+    ...(phone ? { phone, cardName: phone } : {}),
     uid: uid || "",
     ...(name ? { name } : {}),
     ...(phone ? { phone } : {}),
@@ -983,7 +996,8 @@ function desktopSignIn() {
         refresh: "",
         expires: d.expires,
         source: "desktop",
-        accountId: phone || d.name || PROVIDER_NAME,
+        accountId: d.name || PROVIDER_NAME,
+        ...(phone ? { phone, cardName: phone } : {}),
         uid: d.uid || "",
         ...(phone ? { phone } : {}),
       }
@@ -1046,7 +1060,7 @@ export const RaccoonAuthPlugin = async ({ client }) => {
           expires: a.expires,
           ...(a.uid ? { uid: a.uid } : {}),
           ...(a.name ? { name: a.name } : {}),
-          ...(phone ? { accountId: phone, phone } : {}),
+          ...(phone ? { phone, cardName: phone } : {}),
         }
       },
       async loader(getAuth) {
@@ -1138,9 +1152,9 @@ export const RaccoonAuthPlugin = async ({ client }) => {
           }
           return {
             ...result,
-            // 卡片名：auth.accountId 在登录后就是手机号，先于 JWT 的 name/uid；
-            // 老账号（名字是 Raccoon-pu-…）没有 phone，仍显示原来那个名字。
-            user: auth.phone || auth.accountId || a.name || a.uid,
+            // The card's name: the phone when the record has one, else what
+            // the account is called (an older record has no phone).
+            user: auth.cardName || auth.accountId || a.name || a.uid,
             signIn: didRenew ? "renewed" : "kept",
           }
         } catch (e) {

@@ -194,8 +194,10 @@ test("a desktop seat is named by its phone, not by the app's `name`", async () =
   const flow = await method.authorize()
   const res = await flow.callback()
   expect(res.type).toBe("success")
-  expect(res.accountId).toBe("138****8000")
+  // accountId 保持 main 的算法（app 的 name），手机号只是记录上的一个字段
+  expect(res.accountId).toBe("raccoon-pu-01a1365c")
   expect(res.phone).toBe("138****8000")
+  expect(res.cardName).toBe("138****8000")
   expect(res.uid).toBeTruthy()
 })
 
@@ -301,8 +303,9 @@ test("the name usage puts on the card is the phone, not the JWT's name (review #
     access: validTok,
     refresh: "rt1",
     expires: Date.now() + 3600_000,
-    accountId: "138****8000",
+    accountId: "Raccoon-7615755",
     phone: "138****8000",
+    cardName: "138****8000",
     name: "RaccoonBenjamin",
   }))
   expect(u.user).toBe("138****8000")
@@ -676,6 +679,28 @@ test("a desktop seat asks to sign in again once its own token expires", async ()
   const u = await hooks.auth.usage(async () => ({ ...seatA, type: "oauth", access: aTok, expires: Date.now() - 60_000 }))
   expect(u.signIn).toBe("expired")
   expect(u.error).toContain("切换为其他账号")
+})
+
+test("a uid-less desktop seat takes the app's newer token for the same account (review #486, 2)", async () => {
+  tempDir = mkdtempSync(join(tmpdir(), "raccoon-test-"))
+  process.env.RACCOON_BOX_AGENT_CONFIG_DIR = tempDir
+  const authFile = join(tempDir, "auth.json")
+  const noUid = fakeJwt({ name: "NoUid", exp: Math.floor(Date.now() / 1000) + 3600 })
+  writeFileSync(authFile, JSON.stringify({ access_token: noUid, refresh_token: "D1" }))
+  const hooks = await RaccoonAuthPlugin({ client: {} })
+  const seat = await (await hooks.auth.methods[1].authorize()).callback()
+  expect(seat.uid).toBe("")
+  // 同一个账号（名字一致），app 换了一把更新的 token
+  const newer = fakeJwt({ name: "NoUid", exp: Math.floor(Date.now() / 1000) + 7200 })
+  writeFileSync(authFile, JSON.stringify({ access_token: newer, refresh_token: "D2" }))
+  startServer({
+    "GET /api/web/points/v1/balance": () => Response.json({ code: 0, data: { available_points: 321 } }),
+    "GET /api/web/auth/v1/entitlement_info": () => Response.json({ code: 0, data: {} }),
+    "GET /api/web/points/v1/bills": () => Response.json({ code: 0, data: { items: [] } }),
+  })
+  const u = await hooks.auth.usage(async () => ({ ...seat, type: "oauth" }))
+  expect(u.signIn).toBe("kept")
+  expect(u.balance).toBe("321 credits")
 })
 
 test("a desktop seat never takes the app's account when its own uid is unknown", async () => {

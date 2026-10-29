@@ -60,8 +60,8 @@ test("browser authorization returns automatically and completes the code exchang
   const signedIn = await done
   expect(signedIn.type).toBe("success")
   // `accountId` is the phone, `uid` is the id the JWT names
-  expect(signedIn.accountId).toBe("138****8000")
   expect(signedIn.phone).toBe("138****8000")
+  expect(signedIn.cardName).toBe("138****8000")
   expect(calls).toBe(1)
   await expect(fetch(url)).rejects.toThrow()
 })
