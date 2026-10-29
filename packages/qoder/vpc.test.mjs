@@ -388,3 +388,36 @@ test("a VPC account's renewal asks its own instance for the name, and keeps the 
   expect(at.some((w) => w.startsWith("openapi.qoder.com.cn"))).toBe(false)
   expect(at.some((w) => PUBLIC.some((p) => w.startsWith(p)))).toBe(false)
 })
+
+test("a hanging user-info read does not hold another account's chat (review #487, C)", async () => {
+  let release
+  const gate = new Promise((r) => { release = r })
+  const real = globalThis.fetch
+  let userinfoReached = false
+  globalThis.fetch = async (url, init = {}) => {
+    const u = new URL(String(url))
+    if (u.pathname === "/api/v1/userinfo") { userinfoReached = true; await gate; return json({ id: "u-a", name: "A" }) }
+    if (u.pathname === "/api/v1/jobToken/refresh") return json({ token: "jt-a2", refresh_token: "jrt-a2", expires_in: 86400000 })
+    if (u.pathname.endsWith("/chat/completions")) return json({ id: "x", choices: [{ message: { content: "ok" } }] })
+    return new Response("", { status: 404 })
+  }
+  try {
+    const hooks = await QoderCNAuthPlugin({ client: { auth: { set: async () => {} } } })
+    // 账号 A 续期：token 已换，名字正在读（user info 挂着）
+    const pending = hooks.auth.refresh({ type: "oauth", access: "jt-a1", refresh: "jrt-a1", uid: "u-a", expires: Date.now() + 1_000 })
+    for (let i = 0; i < 50 && !userinfoReached; i++) await new Promise((r) => setTimeout(r, 10))
+    expect(userinfoReached).toBe(true)
+    // 账号 B 的对话不能等它
+    const loader = await hooks.auth.loader(async () => ({ type: "oauth", access: "jt-b", refresh: "jrt-b", uid: "u-b", expires: Date.now() + 86_400_000 }))
+    const at = Date.now()
+    const res = await loader.fetch("https://api3.qoder.sh/v1/chat/completions", { method: "POST", body: JSON.stringify({ model: "q", messages: [] }) })
+    // 核心断言是「没等」：返回什么状态不重要，重要是它没被另一个账号的 user-info 拖住
+    expect(res).toBeInstanceOf(Response)
+    expect(Date.now() - at).toBeLessThan(1_000)
+    release()
+    await pending
+  } finally {
+    release()
+    globalThis.fetch = real
+  }
+})

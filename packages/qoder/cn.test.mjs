@@ -301,3 +301,21 @@ test("the config declares qoder-cn on its gateway, with the tiers Qoder CN's CLI
   expect(cfg.provider.qoder.api).toBe("https://api3.qoder.sh")
   expect(Object.keys(cfg.provider.qoder.models)).toContain("qmodel")
 })
+
+test("qoder-cn: a device sign-in names the card by the phone (review #487, E)", async () => {
+  toServer()
+  let polls = 0
+  route = (at) => {
+    if (at === OPENAPI + "/api/v1/deviceToken/poll")
+      return ++polls < 2 ? new Response("", { status: 404 }) : json({ token: "dt-p", refresh_token: "drt-p", user_id: "u-p" })
+    if (at === OPENAPI + "/api/v1/me/jobToken") return json({ token: "jt-p", refresh_token: "jrt-p", expires_in: 3_600_000 })
+    if (at === OPENAPI + "/api/v1/userinfo")
+      return json({ id: "u-p", name: "dsh13800138000", security_mobile: "13800138000" })
+    return new Response("", { status: 404 })
+  }
+  const hooks = await QoderCNAuthPlugin({ client: store().client })
+  const flow = await hooks.auth.methods[0].authorize()
+  const cred = await flow.callback()
+  expect(cred.accountId).toBe("138****8000")
+  expect(cred.uid).toBe("u-p")
+})

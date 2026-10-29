@@ -395,14 +395,16 @@ async function deviceSignIn(site) {
         // a VPC account is told apart from the same person's public one; a
         // device-only one is shown by name, falling back to its id
         accountId: (() => {
-          // 名字只在账号「有手机号」时才变：非手机账号保持原来的 email || uid，
-          // 否则老账号重登会变成新的一行（评审 #487 第 5 点）
-          const phone = phoneLabelOf(user, email, name)
+          // A real email comes first, then the phone: an email account may have
+          // a phone bound to it, and renaming it to that phone would make a new
+          // row (review #487, B). A synthetic phone email is never a name.
+          const named =
+            realEmailOf(email) || phoneLabelOf(user, email, name) || (PHONE_EMAIL.test(String(email ?? "")) ? "" : String(email ?? ""))
           return site.vpc
-            ? `${phone || email || uid} (${site.vpc})`
+            ? `${named || uid} (${site.vpc})`
             : site.deviceOnly
-              ? phone || email || uid || maskedName(name) || dt.user_id
-              : phone || email || dt.user_id
+              ? named || uid || maskedName(name) || dt.user_id
+              : named || dt.user_id
         })(),
         uid,
         email,
@@ -457,7 +459,7 @@ async function patSignIn(site, pat) {
     // an account on a new sign-in when both the accountId and the uid match,
     // so a renewed PAT sign-in must keep naming the same account. A suffix
     // here would add a second row beside the lapsed one instead.
-    accountId: phoneLabelOf(user, email, name) || email || uid,
+    accountId: realEmailOf(email) || phoneLabelOf(user, email, name) || uid,
     uid,
     email,
     name: name || "",
@@ -1895,35 +1897,22 @@ function maskPhone(raw) {
 }
 
 /**
- * The card's name: the phone when the account signed in with one, else a real
- * email, else the name, else the id. A synthetic phone email is never shown —
- * its last four digits are (`****8000`), which is all the vendor gives.
+ * What a renewal may put on the card: the phone the account signs in with
+ * (`138****8000`), or its real email — never the JWT's name and never an id.
+ * A renewal only renames a phone account: an account named by an email or a
+ * uuid keeps that name, since the sign-ins name it the same way.
+ *
+ * Read from the renewed token's user info. No cache: each renewal has a new
+ * token, so nothing is read twice (review #487, 6).
  */
-// One read per token, re-read after LABEL_TTL_MS. The map is capped: a long-
-// lived host renews many tokens, and an unbounded map is a slow leak.
-const LABEL_CAP = 2048
-const labelByToken = new Map()
-const LABEL_TTL_MS = 6 * 60 * 60 * 1000
-
-/** The card's name for a renewed credential, read from its user info (cached). */
-async function refreshedLabelOf(site, token, a) {
+async function refreshedOwnLabelOf(site, token) {
   const key = String(token ?? "")
   if (!key) return ""
-  const hit = labelByToken.get(key)
-  if (hit && Date.now() - hit.at < LABEL_TTL_MS) return hit.label
   try {
     const ui = await openapi(site, site.userInfoPath ?? "/api/v1/userinfo", { token: key })
     if (ui.status < 200 || ui.status >= 300) return ""
     const user = site.normalizeUser ? site.normalizeUser(ui.json) : ui.json
-    const label = accountLabelOf(user, a?.uid, a?.name, a?.email)
-    if (label) {
-      if (labelByToken.size >= LABEL_CAP) {
-        for (const [k, v] of labelByToken) if (Date.now() - v.at >= LABEL_TTL_MS) labelByToken.delete(k)
-        if (labelByToken.size >= LABEL_CAP * 2) labelByToken.clear()
-      }
-      labelByToken.set(key, { at: Date.now(), label })
-    }
-    return label
+    return realEmailOf(user?.email) || phoneLabelOf(user, user?.email, user?.name)
   } catch {
     return ""
   }
@@ -1940,6 +1929,13 @@ function maskedName(name) {
   return m ? n.replace(run[0], m) : ""
 }
 
+/** The account's own email, when it is a real one (a synthetic phone email is not). */
+function realEmailOf(email) {
+  const e = String(email ?? "").trim()
+  if (!e || PHONE_EMAIL.test(e)) return ""
+  return e
+}
+
 /** The phone-derived part of a card's name, or "" when the account has none. */
 function phoneLabelOf(user, email, name) {
   const phone = maskPhone(user?.security_mobile ?? user?.phoneNumber ?? user?.phone ?? user?.mobile)
@@ -1952,11 +1948,11 @@ function phoneLabelOf(user, email, name) {
   return ""
 }
 
-function accountLabelOf(user, uid, name, email, dt) {
+function accountLabelOf(user, uid, name, email) {
   const phone = phoneLabelOf(user, email, name)
   if (phone) return phone
   const synthetic = PHONE_EMAIL.test(String(email ?? ""))
-  return String(synthetic ? "" : (email ?? "")) || maskedName(name) || String(uid ?? "") || String(dt?.user_id ?? "")
+  return String(synthetic ? "" : (email ?? "")) || maskedName(name) || String(uid ?? "")
 }
 
 // changed is the fields of b that differ from a's: what auth.refresh gives.
@@ -2999,27 +2995,33 @@ const makePlugin = (site) => async ({ client }) => {
       refreshLead: RENEW_LEAD,
       async refresh(auth) {
         if (auth?.type !== "oauth" || !auth.access || !auth.uid || !String(auth.refresh ?? "").trim()) return undefined
-        return locked(async () => {
+        const out = await locked(async () => {
           // a request renewed it meanwhile (or magpie hasn't saved this
           // hook's last answer): what that gave, not a second refresh
           const a = latest(auth)
-          if (a.access !== auth.access && a.expires - Date.now() > RENEW_LEAD) return changed(auth, a)
+          if (a.access !== auth.access && a.expires - Date.now() > RENEW_LEAD) return { next: a, renewed: false }
           try {
-            // magpie saves what this gives; an account stored by an earlier
-            // version was named by its uuid, and its renewal is where the
-            // user info can still be read for the name the card should show
-            const next = { ...a, ...(await renew(a)) }
-            // 账号自己的 site（VPC / enterprise host）—— 公共 site 会把企业 token
-            // 发到公网 host（评审 #487 第 1 点）；后缀也与登录时一致（第 2 点）
-            const s = siteOf(site, a)
-            const label = await refreshedLabelOf(s, next.access, a)
-            const accountId = label ? (s.vpc ? `${label} (${s.vpc})` : label) : ""
-            return accountId ? { ...changed(auth, next), accountId } : changed(auth, next)
+            return { next: { ...a, ...(await renew(a)) }, renewed: true }
           } catch (e) {
             if (e?.expired) throw Object.assign(new Error(e.message), { signIn: "expired" })
             throw e
           }
         })
+        const fields = changed(auth, out.next)
+        if (!out.renewed) return fields
+        // The name is read outside the lock: this lock is the plugin's, shared
+        // by every account, and a user-info call may take 20 seconds — a chat
+        // from another account must not wait on it (review #487, C). The
+        // account's own site, too: a public one would send an enterprise token
+        // to the public hosts (1), and the suffix must match the sign-in (2).
+        try {
+          const s = siteOf(site, out.next)
+          const label = await refreshedOwnLabelOf(s, out.next.access)
+          const accountId = label ? (s.vpc ? `${label} (${s.vpc})` : label) : ""
+          return accountId ? { ...fields, accountId } : fields
+        } catch {
+          return fields
+        }
       },
       async loader(getAuth) {
         const a = await getAuth()
@@ -3228,4 +3230,4 @@ export async function QwenWorkEnterpriseAuthPlugin({ client }) {
 export const protocol = { makePlugin, deviceSignIn, openapi, siteOf }
 
 // for tests
-export const _internal = { maskPhone, accountLabelOf, chatHeaders, machineOS, machineHostname, cosyHeaders, typedUnions, Splitter, campaignRuntime, RUNTIMES, campaignPage, campaignTarget, vpcInstance, vpcSite, parseUsage, gfmt, when, failure, modelInfo, qoderBody, qoderMessages, cacheMarked, sessionOf, namedSession, taskOf, TASKS, TASK_MAX, TASK_IDLE, SESSION, SITES, decodeBody, events, QUEUE, queueState }
+export const _internal = { maskPhone, maskedName, accountLabelOf, chatHeaders, machineOS, machineHostname, cosyHeaders, typedUnions, Splitter, campaignRuntime, RUNTIMES, campaignPage, campaignTarget, vpcInstance, vpcSite, parseUsage, gfmt, when, failure, modelInfo, qoderBody, qoderMessages, cacheMarked, sessionOf, namedSession, taskOf, TASKS, TASK_MAX, TASK_IDLE, SESSION, SITES, decodeBody, events, QUEUE, queueState }

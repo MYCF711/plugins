@@ -17,16 +17,23 @@ test("maskPhone: 0086- / +86 / bare / already masked, always 3+4", () => {
   expect(x.maskPhone("")).toBe("")
   expect(x.maskPhone(undefined)).toBe("")
   expect(x.maskPhone("123")).toBe("")
-  // an 86-prefixed real number is not a country code
+  // a number that merely starts with 86 is not a country code either
   expect(x.maskPhone("86123456789")).toBe("123****6789")
+})
+
+test("accountLabelOf: a name carrying the whole number is masked (review #487, E)", () => {
+  expect(x.accountLabelOf({ id: "u", name: "dsh13800138000" }, "u", "dsh13800138000", "")).toBe("dsh138****8000")
+  expect(x.maskedName("1234567")).toBe("123****4567")
+  expect(x.maskedName("user12345")).toBe("user12345")
+  expect(x.maskedName("Bob")).toBe("Bob")
 })
 
 test("accountLabelOf: the phone first, then a real email, then the name, then the id", () => {
   // Qoder CN, measured: `security_mobile` is the full number
-  expect(x.accountLabelOf({ id: "01a0cbf7-5fac-773b-ad7f-1caa4539a32d", name: "dsh13800138000", security_mobile: "13800138000" }, "01a0cbf7-5fac-773b-ad7f-1caa4539a32d", "dsh13800138000", "")).toBe("138****8000")
+  expect(x.accountLabelOf({ id: "11111111-2222-3333-4444-555555555555", name: "dsh13800138000", security_mobile: "13800138000" }, "11111111-2222-3333-4444-555555555555", "dsh13800138000", "")).toBe("138****8000")
   // QwenWork's phone accounts: four digits as `name`, a synthetic email
-  const synthetic = "phone_21089c96-6908-4178-b254-9d84c062b59d@phone.local"
-  expect(x.accountLabelOf({ id: "21089c96-6908-4178-b254-9d84c062b59d", name: "8000", email: synthetic }, "21089c96-6908-4178-b254-9d84c062b59d", "8000", synthetic)).toBe("****8000")
+  const synthetic = "phone_66666666-7777-8888-9999-000000000000@phone.local"
+  expect(x.accountLabelOf({ id: "66666666-7777-8888-9999-000000000000", name: "8000", email: synthetic }, "66666666-7777-8888-9999-000000000000", "8000", synthetic)).toBe("****8000")
   // an email sign-in keeps its email
   expect(x.accountLabelOf({ id: "u1", name: "DSH-MYCF", email: "someone@example.com" }, "u1", "DSH-MYCF", "someone@example.com")).toBe("someone@example.com")
   // nothing usable but the id: the id, as before (never a fabricated name)

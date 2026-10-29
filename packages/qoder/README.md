@@ -314,8 +314,14 @@ An email sign-in keeps its email.
 
 `uid` stays the vendor's own id (it is what tells two accounts apart), and a renewal reads
 the user info again, so an account stored by an earlier version — named by its uuid — is
-renamed at its next renewal. A failed read leaves the id on the card and never costs a
-sign-in.
+renamed at its next renewal. Only a phone (or a real email) changes a name: an account named
+by an email or by its id keeps that name, so signing in again replaces it rather than adding
+a row. A failed read leaves the id on the card and never costs a sign-in.
+
+**Upgrading from 0.2.48, when the old account's renewal has lapsed:** its renewal fails, so
+it is never renamed; signing in again then names it by the phone, and magpie's host matches an
+account on `accountId` — the new account lands beside the lapsed uuid row. Delete that row
+once (`已过期` / the uuid-looking one).
 
 ## QwenWork (千问办公)
 
