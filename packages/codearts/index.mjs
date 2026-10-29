@@ -67,6 +67,22 @@ const OPENGW_GATEWAY_CONFIG_URL = `${OPENGW_HOST}/api/v1/gateway/config`
 // two the plugin itself calls, by name. STS takes the refresh token, never a
 // signature, and the portal only ever opens in the browser.
 const SIGNED_HOSTS = new Set([SNAP_HOST, OPENGW_HOST].map((u) => new URL(u).host))
+
+// Huawei Cloud IAM: the one place an account's own phone number can be read
+// with the credentials a sign-in already carries (`GET /v3.0/OS-USER/users/
+// {principal_id}` answers `user.phone`, measured `0086-18970098051`).
+//
+// Deliberately NOT in SIGNED_HOSTS. magpie forwards requests through this
+// plugin's `fetch`, and that set is the fence around the account's temporary
+// credentials; adding IAM to it would let an `api` override carry them to
+// another service. The plugin's own GET is signed here, by this one function,
+// for this one URL — nothing forwarded ever reaches IAM signed.
+const IAM_HOST = "https://iam.cn-north-4.myhuaweicloud.com"
+const IAM_USER_URL = (userId) => `${IAM_HOST}/v3.0/OS-USER/users/${encodeURIComponent(userId)}`
+const IAM_TIMEOUT_MS = 8_000
+// The phone never changes for one IAM user, and the card asks often: one read
+// per account is enough, kept in memory for the life of the process.
+const IAM_PHONE_TTL_MS = 6 * 60 * 60 * 1000
 // The daily free token pool a `maas_type: benefit` chat draws on (never the
 // credit packages), so a free model's spend shows up in the usage panel.
 const BENEFIT_BALANCE_URL = `${OPENGW_HOST}/api/v1/user/tokens/balance`
@@ -482,23 +498,101 @@ function b64Json(s) {
   }
 }
 
+/** The signer's claims from the refresh token's `user_profile`, or null. */
+function profileOf(cred) {
+  const token = typeof cred?.refresh_token === "string" ? cred.refresh_token : ""
+  const parts = token.split(".")
+  if (parts.length !== 3) return null
+  const payload = b64Json(parts[1])
+  const raw = payload?.user_profile
+  return typeof raw === "string" ? (safeJson(raw) ?? b64Json(raw)) : asRecord(raw)
+}
+
 /**
  * Who signed in. STS answers with no user fields, so without this every
  * sign-in looked like a new account to magpie (one more `codearts#xxxxxx`);
  * the refresh_token is a JWT whose `user_profile` claim names the signer.
  * `id` tells accounts apart, `name` is what the usage card shows.
+ *
+ * The claim carries no phone number, only IAM's `account_name` (the `hw…`
+ * string) and `principal_urn` — which is why the card used to show
+ * `iam::<domain>:user:<name>`, an ID nobody can tell apart from another
+ * account's. `user_phone` (read from IAM after sign-in, see
+ * `fetchAccountPhone`) stands in front of them when it is there.
  */
 function accountIdentityOf(cred) {
   const legacy = { id: firstOf(cred?.user_name, cred?.user_id), name: firstOf(cred?.user_name) }
-  const token = typeof cred?.refresh_token === "string" ? cred.refresh_token : ""
-  const parts = token.split(".")
-  if (parts.length !== 3) return legacy
-  const payload = b64Json(parts[1])
-  const raw = payload?.user_profile
-  const profile = typeof raw === "string" ? (safeJson(raw) ?? b64Json(raw)) : asRecord(raw)
-  const id = firstOf(profile?.principal_urn, profile?.account_name, profile?.account_id, profile?.user_id, legacy.id)
-  const name = firstOf(profile?.user_name, profile?.account_name, profile?.domain_name, legacy.name)
+  const profile = profileOf(cred)
+  if (!profile) return { ...legacy, name: firstOf(cred?.user_phone, legacy.name) }
+  const id = firstOf(profile.principal_urn, profile.account_name, profile.account_id, profile.user_id, legacy.id)
+  const name = firstOf(cred?.user_phone, profile.user_name, profile.account_name, profile.domain_name, legacy.name)
   return { id, name }
+}
+
+/**
+ * A phone number as the cards show it: `0086-18970098051` → `189****8051`.
+ * The area code Huawei answers with is dropped, and any number too short to
+ * mask is not a name worth showing (empty, so the caller falls back).
+ */
+function maskPhone(raw) {
+  let digits = String(raw ?? "").replace(/\D/g, "")
+  // Huawei Cloud writes the country code as `0086-…`; a person's own number
+  // may come as `+86 …`. Either is dropped when an 11-digit number follows.
+  if (digits.length > 11 && digits.startsWith("0086")) digits = digits.slice(4)
+  else if (digits.length > 11 && digits.startsWith("86")) digits = digits.slice(2)
+  if (digits.length < 7) return ""
+  return `${digits.slice(0, 3)}****${digits.slice(-4)}`
+}
+
+// One phone read per IAM user, for the life of the process: the account's
+// phone does not change, and both sign-in and every usage read ask for it.
+const phoneByIamUser = new Map()
+
+/**
+ * The account's own phone number, read from Huawei Cloud IAM with the
+ * credentials the sign-in already holds. Best effort: `""` when the claim has
+ * no `principal_id`, the call fails, or the answer carries no usable number —
+ * a display name must never cost anyone a sign-in.
+ */
+async function fetchAccountPhone(cred, fetcher = globalThis.fetch) {
+  const iamUserId = firstOf(profileOf(cred)?.principal_id, profileOf(cred)?.user_id)
+  if (!iamUserId || !cred?.access_key_id || !cred?.security_token) return ""
+  const hit = phoneByIamUser.get(iamUserId)
+  if (hit && Date.now() - hit.at < IAM_PHONE_TTL_MS) return hit.phone
+  try {
+    const url = IAM_USER_URL(iamUserId)
+    const signed = await signRequestHuawei(
+      cred.access_key_id, cred.secret_access_key, cred.security_token,
+      "GET", url, new Uint8Array(),
+    )
+    const headers = new Headers()
+    signed.forEach((value, key) => {
+      if (key !== "host") headers.set(key, value)
+    })
+    const res = await fetcher(url, {
+      method: "GET",
+      headers,
+      redirect: "error",
+      signal: AbortSignal.timeout(IAM_TIMEOUT_MS),
+    })
+    if (!res.ok) return ""
+    const body = await res.json().catch(() => null)
+    const phone = maskPhone(body?.user?.phone)
+    if (phone) phoneByIamUser.set(iamUserId, { at: Date.now(), phone })
+    return phone
+  } catch {
+    return ""
+  }
+}
+
+/** `{ user_phone }` when the account has one to show, else `{}` (never throws). */
+async function accountPhoneField(cred, fetcher) {
+  try {
+    const phone = await fetchAccountPhone(cred, fetcher)
+    return phone ? { user_phone: phone } : {}
+  } catch {
+    return {}
+  }
 }
 
 /** The credential a sign-in carries; magpie keeps it in the `access` field. */
@@ -2432,13 +2526,23 @@ export const CodeArtsAuthPlugin = async ({ client } = {}, options = {}) => {
       async refresh(auth) {
         const cred = credentialOf(auth)
         if (!cred) return undefined
-        const next = await renewOnce(cred)
-        const accountId = auth.accountId ? "" : accountIdentityOf(next).id
+        const renewed = await renewOnce(cred)
+        // A rotation rebuilds the credential: keep what only the stored one
+        // knows (`session_id`, the phone), and read the phone once for an
+        // account signed in before it was being read at all.
+        const next = {
+          ...renewed,
+          ...(cred.user_phone && !renewed.user_phone ? { user_phone: cred.user_phone } : {}),
+        }
+        const identified = next.user_phone ? next : { ...next, ...(await accountPhoneField(next, fetcher)) }
+        const identity = accountIdentityOf(identified)
         return {
-          access: JSON.stringify(next),
-          refresh: next.refresh_token,
-          expires: expiresFromCredential(next),
-          ...(accountId ? { accountId } : {}),
+          access: JSON.stringify(identified),
+          refresh: identified.refresh_token,
+          expires: expiresFromCredential(identified),
+          // The card's name, not IAM's URN; the URN goes as `uid`.
+          ...(identity.name ? { accountId: identity.name } : {}),
+          ...(identity.id ? { uid: identity.id } : {}),
         }
       },
 
@@ -2546,7 +2650,11 @@ export const CodeArtsAuthPlugin = async ({ client } = {}, options = {}) => {
             grants: readGrants(ledgerPath, await ledgerKey(cred)),
             benefitIds: state.benefit ? [...state.benefit] : BENEFIT_MODEL_FALLBACK,
           })
-          const user = accountIdentityOf(cred).name
+          // The card names the account by its phone, not by IAM's `hw…` id or
+          // its URN — read once here for an account whose credential predates
+          // that read (the next refresh stores it).
+          const phone = firstOf(cred.user_phone) || (await fetchAccountPhone(cred, fetcher))
+          const user = phone || accountIdentityOf(cred).name
           return user ? { ...usage, user } : usage
         } catch (e) {
           return { error: e?.message ?? String(e), windows: [] }
@@ -2600,15 +2708,22 @@ export const CodeArtsAuthPlugin = async ({ client } = {}, options = {}) => {
                   const outcome = await flow.result
                   const cred = safeJson(outcome.access)
                   if (!cred?.access_key_id) return { type: "failed", error: "CodeArts did not return a credential" }
-                  // Who signed in, so signing in again replaces the account
-                  // instead of adding a `codearts#xxxxxx` beside it.
-                  const accountId = accountIdentityOf(cred).id
+                  // The card needs a name a person can tell apart, and the
+                  // token carries only IAM's `hw…` id; the phone is one read
+                  // away (best effort: a failed read still signs in).
+                  const identified = { ...cred, ...(await accountPhoneField(cred, fetcher)) }
+                  const identity = accountIdentityOf(identified)
+                  // `accountId` is the card's name — the phone when IAM gives
+                  // one, else the account's own `hw…` name, never the URN.
+                  // `uid` is the URN: with the same `accountId` it lets magpie
+                  // replace this account instead of adding a `codearts#xxxxxx`.
                   return {
                     type: "success",
-                    access: outcome.access,
+                    access: JSON.stringify(identified),
                     refresh: cred.refresh_token,
                     expires: outcome.expires,
-                    ...(accountId ? { accountId } : {}),
+                    ...(identity.name ? { accountId: identity.name } : {}),
+                    ...(identity.id ? { uid: identity.id } : {}),
                   }
                 } catch (e) {
                   return { type: "failed", error: e?.message ?? String(e) }
@@ -2636,7 +2751,12 @@ function nearExpiry(cred) {
  * merged), so the account's other fields — its accountId — go along.
  */
 async function persistCredential(client, account, cred) {
-  const accountId = firstOf(account?.accountId, accountIdentityOf(cred).id)
+  const identity = accountIdentityOf(cred)
+  // `accountId` is what the card shows: the human name (the phone), never the
+  // URN. The URN rides along as `uid`, which is what magpie tells a second
+  // sign-in of the same account apart from another account by.
+  const accountId = firstOf(identity.name, account?.accountId, identity.id)
+  const uid = firstOf(identity.id, account?.uid)
   const body = {
     ...asRecord(account),
     type: "oauth",
@@ -2644,6 +2764,7 @@ async function persistCredential(client, account, cred) {
     refresh: cred.refresh_token,
     expires: expiresFromCredential(cred),
     ...(accountId ? { accountId } : {}),
+    ...(uid ? { uid } : {}),
   }
   try {
     await client?.auth?.set?.({ path: { id: PROVIDER }, body })
@@ -2664,6 +2785,7 @@ export const _internal = {
   generatePkcePair, generateDpopKeyPair, keyPairFromStoredJwk, signDpopJws,
   buildCanonicalRequest, signRequestHuawei,
   credentialFromTokenResponse, credentialOf, expiresFromCredential, accountIdentityOf, accountSessionIds,
+  profileOf, maskPhone, fetchAccountPhone, accountPhoneField, IAM_HOST, IAM_USER_URL,
   requestToken, exchangeAuthorizationCode, exchangeRefreshToken, refreshCredential,
   isDeadRefreshToken, isPermanentRefreshFailure, nearExpiry, persistCredential,
   buildOAuthLoginUrl, buildPortalLoginResultUrl,

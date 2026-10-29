@@ -35,9 +35,19 @@ magpie's (or OpenCode's) own account store. `auth.refresh` renews it 30 minutes 
 expires, reusing the same verifier and DPoP key; a stale credential met on a request
 (`401`, `APIG.0602`) is renewed once and the request sent again. A refresh token is spent once
 per account, however many loaders ask; a renewal that only fails for now (STS unreachable)
-answers `503` and keeps the sign-in, and only one STS turns away for good marks it. The
-account id is the signer named in the refresh token, so signing in again replaces the account
-instead of adding one.
+answers `503` and keeps the sign-in, and only one STS turns away for good marks it.
+
+**The card's name:** the account is shown by its **phone number** (`189****8051`, masked the way
+the other magpie cards mask theirs), read once after signing in from Huawei Cloud IAM —
+`GET https://iam.cn-north-4.myhuaweicloud.com/v3.0/OS-USER/users/{principal_id}`, signed with
+the same temporary credentials — and kept on the credential as `user_phone`. The refresh token
+names the signer only by IAM's own ids (`hw061571365626786`, and the URN
+`iam::<domain>:user:<name>`), which read as an ID nobody can tell apart from another account's;
+the account name is the fallback when the phone can't be read, and the URN never is. The
+signer's URN still goes to magpie as `uid`, so signing in again replaces the account instead of
+adding one — including an account stored by an older version, whose name is corrected at its
+next renewal. IAM is *not* one of the hosts the plugin signs forwarded requests for
+(`SIGNED_HOSTS`): the one phone read is made by the plugin itself, for that one URL.
 
 ## Models
 
