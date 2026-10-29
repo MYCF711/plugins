@@ -13,6 +13,7 @@ OpenCode & Magpie provider plugin for **SenseTime Raccoon (商汤小浣熊, `xia
 - **Usage & allowances**: reports available credits, unexpired grant bills, daily expiration timestamps, and Pro/Free subscription plans.
 - **Daily check-in & desktop onboarding grant**: supports Magpie automatic daily check-in (`+300` credits/day) and one-time desktop onboarding grant (`+3000` credits).
 - **SSE model rewrite**: transparently rewrites internal upstream model names back to requested downstream models for client compatibility.
+- **The card's name**: the account's own phone number (`181****0632`), read once per token from `/api/web/auth/v1/user_info` with the JWT the sign-in holds. The JWT names the signer only by `Raccoon-pu-<uuid>` — an id, not a name — which is what the card used to show. `uid` stays that id (it is what tells two accounts apart); a renewal puts the phone on an account stored by an earlier version, and a failed read leaves the JWT's name on the card rather than costing a sign-in.
 
 ## 中文
 

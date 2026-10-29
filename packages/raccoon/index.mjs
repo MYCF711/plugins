@@ -96,6 +96,55 @@ function extractDisplayName(claims) {
   return String(claims?.name ?? "").trim()
 }
 
+// ---- the card's name --------------------------------------------------------
+
+/**
+ * A phone number as the cards show it: `86 18170800632` / `0086-…` / bare /
+ * already masked → `181****0632`.
+ */
+function maskPhone(raw) {
+  let digits = String(raw ?? "").replace(/\D/g, "")
+  if (digits.startsWith("0086") && digits.length - 4 >= 7) digits = digits.slice(4)
+  else if (digits.startsWith("86") && digits.length - 2 >= 7) digits = digits.slice(2)
+  if (digits.length < 7) return ""
+  return `${digits.slice(0, 3)}****${digits.slice(-4)}`
+}
+
+// One read per token, for the life of the process: the phone does not change,
+// and both a sign-in and every renewal ask (the same token while it lasts).
+const phoneByToken = new Map()
+const PHONE_TTL_MS = 6 * 60 * 60 * 1000
+
+/**
+ * The account's own phone number, read from the web API with the token the
+ * sign-in already holds (`GET /api/web/auth/v1/user_info` answers `data.phone`,
+ * measured `18170800632` on an `sms`-registered account).
+ *
+ * The JWT names the signer only by `Raccoon-pu-<uuid>` — an id, not a name —
+ * so the card used to show that string. Best effort: no token, a refusal or an
+ * answer without a number leaves the JWT's name on the card, and never costs a
+ * sign-in.
+ */
+async function accountPhoneOf(access) {
+  const token = stripBearer(access)
+  if (!token) return ""
+  const hit = phoneByToken.get(token)
+  if (hit && Date.now() - hit.at < PHONE_TTL_MS) return hit.phone
+  try {
+    const res = await fetch(`${mainOrigin()}/api/web/auth/v1/user_info`, {
+      headers: { Accept: "application/json", Authorization: "Bearer " + token },
+      signal: AbortSignal.timeout(15_000),
+    })
+    if (!res.ok) return ""
+    const payload = await res.json().catch(() => null)
+    const phone = maskPhone(payload?.data?.phone)
+    if (phone) phoneByToken.set(token, { at: Date.now(), phone })
+    return phone
+  } catch {
+    return ""
+  }
+}
+
 function vendorErrorText(payload, fallback) {
   for (const k of ["details", "message", "msg"]) {
     if (typeof payload?.[k] === "string" && payload[k].trim()) return payload[k].trim()
@@ -789,19 +838,23 @@ async function exchangeAuthCode(code) {
   return { access, refresh }
 }
 
-function toSuccessAuth(access, refresh, extra = {}) {
+async function toSuccessAuth(access, refresh, extra = {}) {
   const claims = decodeJwtClaims(access)
   const uid = extractUserId(claims)
   const name = extractDisplayName(claims)
   const expires = jwtExpiryMs(access)
+  // `accountId` is what the card shows: the phone when the account has one,
+  // else the JWT's own name, else the id. `uid` stays the id.
+  const phone = await accountPhoneOf(access)
   return {
     type: "success",
     access,
     refresh: refresh || "",
     expires,
-    accountId: name || (uid ? `Raccoon-${uid}` : PROVIDER_NAME),
+    accountId: phone || name || (uid ? `Raccoon-${uid}` : PROVIDER_NAME),
     uid: uid || "",
     ...(name ? { name } : {}),
+    ...(phone ? { phone } : {}),
     ...extra,
   }
 }
@@ -850,7 +903,7 @@ async function browserSignIn(timeoutMs = 10 * 60 * 1000) {
       const tokens = await exchangeAuthCode(code)
       if (settled) return reply(408, "登录已超时，请回到 Magpie 重新登录。")
       reply(200, "商汤小浣熊登录成功，可以关闭此页并返回 Magpie。")
-      finish(toSuccessAuth(tokens.access, tokens.refresh))
+      finish(await toSuccessAuth(tokens.access, tokens.refresh))
     } catch (e) {
       reply(502, "登录未完成，请返回 Magpie 查看错误并重新登录。")
       finish({ type: "failed", error: e?.message ?? String(e) })
@@ -884,7 +937,7 @@ function manualSignIn() {
       try {
         const parsed = parseCallbackInput(input, state)
         const tokens = parsed.direct ? parsed.direct : await exchangeAuthCode(parsed.code)
-        return toSuccessAuth(tokens.access, tokens.refresh)
+        return await toSuccessAuth(tokens.access, tokens.refresh)
       } catch (e) {
         return { type: "failed", error: e?.message ?? String(e) }
       }
@@ -971,12 +1024,16 @@ export const RaccoonAuthPlugin = async ({ client }) => {
         if (auth?.type !== "oauth" || auth.source === "desktop" || !auth.access || !auth.refresh) return undefined
         const { a, didRenew } = await currentAuth(client, auth, true)
         if (!didRenew) return undefined
+        // An account stored by an older version was named by `Raccoon-pu-…`;
+        // its renewal is where the phone can still be read and put on the card.
+        const phone = await accountPhoneOf(a.access)
         return {
           access: a.access,
           refresh: a.refresh,
           expires: a.expires,
           ...(a.uid ? { uid: a.uid } : {}),
           ...(a.name ? { name: a.name } : {}),
+          ...(phone ? { accountId: phone, phone } : {}),
         }
       },
       async loader(getAuth) {
