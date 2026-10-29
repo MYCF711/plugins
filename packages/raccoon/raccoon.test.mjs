@@ -1123,3 +1123,12 @@ test("a 0.1.4-style record keeps its accountId on renewal and shows the phone (r
   const u = await hooks.auth.usage(async () => ({ ...old, ...renewed, access: "new-tok", expires: Date.now() + 86_400_000 }))
   expect(u.user).toBe("138****8000")
 })
+
+test("a desktop seat's refresh gives nothing, even when user_info answers a phone (review #486, 2)", async () => {
+  startServer({
+    "/api/web/auth/v1/user_info": () => Response.json({ code: 0, data: { phone: "13800138000" } }),
+  })
+  const hooks = await RaccoonAuthPlugin({ client: {} })
+  const got = await hooks.auth.refresh({ type: "oauth", source: "desktop", access: "tok-desktop", expires: Date.now() + 1_000 })
+  expect(got).toBeUndefined()
+})
