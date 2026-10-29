@@ -22,23 +22,16 @@ test("maskPhone: 0086- / +86 / bare / already masked, always 3+4", () => {
   expect(x.maskPhone("86123456789")).toBe("")
 })
 
-test("accountLabelOf: a name carrying the whole number is masked (review #487, E)", () => {
-  expect(x.accountLabelOf({ id: "u", name: "dsh13800138000" }, "u", "dsh13800138000", "")).toBe("dsh138****8000")
-  expect(x.maskedName("1234567")).toBe("")
-  expect(x.maskedName("user12345")).toBe("user12345")
-  expect(x.maskedName("Bob")).toBe("Bob")
+test("phoneLabelOf: the phone, or a synthetic email's four digits, else nothing", () => {
+  expect(x.phoneLabelOf({ security_mobile: "13800138000" }, "", "")).toBe("138****8000")
+  const synthetic = "phone_66666666-7777-8888-9999-000000000000@phone.local"
+  expect(x.phoneLabelOf({ name: "8000", email: synthetic }, synthetic, "8000")).toBe("****8000")
+  expect(x.phoneLabelOf({ id: "u1" }, "", "")).toBe("")
 })
 
-test("accountLabelOf: the phone first, then a real email, then the name, then the id", () => {
-  // Qoder CN, measured: `security_mobile` is the full number
-  expect(x.accountLabelOf({ id: "11111111-2222-3333-4444-555555555555", name: "dsh13800138000", security_mobile: "13800138000" }, "11111111-2222-3333-4444-555555555555", "dsh13800138000", "")).toBe("138****8000")
-  // QwenWork's phone accounts: four digits as `name`, a synthetic email
-  const synthetic = "phone_66666666-7777-8888-9999-000000000000@phone.local"
-  expect(x.accountLabelOf({ id: "66666666-7777-8888-9999-000000000000", name: "8000", email: synthetic }, "66666666-7777-8888-9999-000000000000", "8000", synthetic)).toBe("****8000")
-  // an email sign-in keeps its email
-  expect(x.accountLabelOf({ id: "u1", name: "DSH-MYCF", email: "someone@example.com" }, "u1", "DSH-MYCF", "someone@example.com")).toBe("someone@example.com")
-  // nothing usable but the id: the id, as before (never a fabricated name)
-  expect(x.accountLabelOf({ id: "u1" }, "u1", "", "")).toBe("u1")
-  // a synthetic phone email with no four-digit name is not shown at all
-  expect(x.accountLabelOf({}, "u2", "", synthetic)).toBe("u2")
+test("realEmailOf: a real email, never a synthetic phone one", () => {
+  expect(x.realEmailOf("someone@example.com")).toBe("someone@example.com")
+  expect(x.realEmailOf("phone_66666666-7777-8888-9999-000000000000@phone.local")).toBe("")
+  expect(x.realEmailOf("")).toBe("")
+  expect(x.realEmailOf(undefined)).toBe("")
 })

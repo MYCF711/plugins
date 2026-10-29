@@ -1890,7 +1890,8 @@ function signed(res, renewed) {
 
 // ---- the card's name ----------------------------------------------------------
 //
-// `accountId` is what the card shows, and a uuid is not a name. Both phone
+// The card's name is not `accountId` (a uuid is not a name, and accountId is
+// the identity magpie keys settings by). Both phone
 // sign-ins here carry the phone somewhere in their user info: Qoder CN answers
 // `security_mobile` (measured `13800138000`), QwenWork's phone accounts answer
 // only the last four digits as `name` plus a synthetic
@@ -1916,29 +1917,20 @@ function maskPhone(raw) {
  * Read from the renewed token's user info. No cache: each renewal has a new
  * token, so nothing is read twice (review #487, 6).
  */
-async function refreshedPhoneLabelOf(site, token) {
+async function refreshedNames(site, token) {
   const key = String(token ?? "")
-  if (!key) return ""
+  if (!key) return {}
   try {
     const ui = await openapi(site, site.userInfoPath ?? "/api/v1/userinfo", { token: key })
-    if (ui.status < 200 || ui.status >= 300) return ""
+    if (ui.status < 200 || ui.status >= 300) return {}
     const user = site.normalizeUser ? site.normalizeUser(ui.json) : ui.json
     const label = phoneLabelOf(user, user?.email, user?.name)
-    return label ? (site.vpc ? `${label} (${site.vpc})` : label) : ""
+    const suffix = (v) => (v ? (site.vpc ? `${v} (${site.vpc})` : v) : "")
+    // built as the sign-in builds it: a real email first, then the phone
+    return { phoneLabel: suffix(label), cardName: suffix(realEmailOf(user?.email) || label) }
   } catch {
-    return ""
+    return {}
   }
-}
-
-// a name can carry the full number (`dsh13800138000` on Qoder CN): mask a run
-// of 7+ digits, or give up on the name rather than print it.
-function maskedName(name) {
-  const n = String(name ?? "")
-  if (!n) return ""
-  const run = n.match(/\d{7,}/)
-  if (!run) return n
-  const m = maskPhone(run[0])
-  return m ? n.replace(run[0], m) : ""
 }
 
 /** The account's own email, when it is a real one (a synthetic phone email is not). */
@@ -1958,13 +1950,6 @@ function phoneLabelOf(user, email, name) {
     if (/^\d{4}$/.test(tail)) return `****${tail}`
   }
   return ""
-}
-
-function accountLabelOf(user, uid, name, email) {
-  const phone = phoneLabelOf(user, email, name)
-  if (phone) return phone
-  const synthetic = PHONE_EMAIL.test(String(email ?? ""))
-  return String(synthetic ? "" : (email ?? "")) || maskedName(name) || String(uid ?? "")
 }
 
 // changed is the fields of b that differ from a's: what auth.refresh gives.
@@ -3030,8 +3015,11 @@ const makePlugin = (site) => async ({ client }) => {
         // to the public hosts (1), and the suffix must match the sign-in (2).
         try {
           const s = siteOf(site, out.next)
-          const phoneLabel = await refreshedPhoneLabelOf(s, out.next.access)
-          return phoneLabel ? { ...fields, phoneLabel, cardName: phoneLabel } : fields
+          const { phoneLabel, cardName } = await refreshedNames(s, out.next.access)
+          const extra = {}
+          if (phoneLabel) extra.phoneLabel = phoneLabel
+          if (cardName) extra.cardName = cardName
+          return Object.keys(extra).length ? { ...fields, ...extra } : fields
         } catch {
           return fields
         }
@@ -3243,4 +3231,4 @@ export async function QwenWorkEnterpriseAuthPlugin({ client }) {
 export const protocol = { makePlugin, deviceSignIn, openapi, siteOf }
 
 // for tests
-export const _internal = { maskPhone, maskedName, accountLabelOf, chatHeaders, machineOS, machineHostname, cosyHeaders, typedUnions, Splitter, campaignRuntime, RUNTIMES, campaignPage, campaignTarget, vpcInstance, vpcSite, parseUsage, gfmt, when, failure, modelInfo, qoderBody, qoderMessages, cacheMarked, sessionOf, namedSession, taskOf, TASKS, TASK_MAX, TASK_IDLE, SESSION, SITES, decodeBody, events, QUEUE, queueState }
+export const _internal = { maskPhone, phoneLabelOf, realEmailOf, chatHeaders, machineOS, machineHostname, cosyHeaders, typedUnions, Splitter, campaignRuntime, RUNTIMES, campaignPage, campaignTarget, vpcInstance, vpcSite, parseUsage, gfmt, when, failure, modelInfo, qoderBody, qoderMessages, cacheMarked, sessionOf, namedSession, taskOf, TASKS, TASK_MAX, TASK_IDLE, SESSION, SITES, decodeBody, events, QUEUE, queueState }

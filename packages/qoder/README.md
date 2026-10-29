@@ -305,23 +305,21 @@ The hosts and reply shapes come from a real VPC account's report
 ## The card's name
 
 An account signed in with a phone is shown by that phone — masked, `138****8000` — not by
-the uuid its sign-in carries. Qoder CN's user info answers the number as `security_mobile`
+its `accountId`, which is a uuid. Qoder CN's user info answers the number as `security_mobile`
 (measured `13800138000`), so that is what the card takes.
 
 QwenWork's phone accounts answer only the last four digits, as `name`, beside a synthetic
 `phone_<uuid>@phone.local` email (measured): the card shows `****8000` and never that email.
 An email sign-in keeps its email.
 
-`uid` stays the vendor's own id (it is what tells two accounts apart), and a renewal reads
-the user info again, so an account stored by an earlier version — named by its uuid — is
-renamed at its next renewal. Only a phone (or a real email) changes a name: an account named
-by an email or by its id keeps that name, so signing in again replaces it rather than adding
-a row. A failed read leaves the id on the card and never costs a sign-in.
+`accountId` stays the account's identity — what magpie keys the user's own name for
+it, its proxy, model picks, caps and a gateway key's account list by — so it never
+changes: it is what a sign-in and every renewal give back. The card's name is usage's
+`user`, a field magpie shows and never keys by.
 
-**Upgrading from 0.2.48, when the old account's renewal has lapsed:** its renewal fails, so
-it is never renamed; signing in again then names it by the phone, and magpie's host matches an
-account on `accountId` — the new account lands beside the lapsed uuid row. Delete that row
-once (`已过期` / the uuid-looking one).
+A sign-in reads the user info, and a renewal reads it again (outside the token lock),
+so an account stored by an earlier version shows the phone on the card at its next
+renewal. A failed read changes nothing and never costs a sign-in.
 
 ## QwenWork (千问办公)
 

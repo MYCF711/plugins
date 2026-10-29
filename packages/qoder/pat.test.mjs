@@ -339,9 +339,11 @@ test("qoder-cn: a non-phone account keeps one name through sign-in, renewal and 
   const pat = hooks.auth.methods.find((m) => m.label?.includes("PAT"))
   const first = await pat.authorize({ pat: "pt-x" }).callback()
   expect(first.accountId).toBe("same-user")
-  // 续期不该把它改名：没有手机号，名字保持登录时那个
+  // a renewal must not rename it: no phone, so the name the sign-in gave stays
   const renewed = await hooks.auth.refresh({ ...first, type: "oauth", expires: Date.now() + 1_000 })
   expect(renewed.accountId).toBeUndefined()
+  // 没有手机号也没有邮箱：续期不改名字，也不给 cardName
+  expect(renewed.cardName).toBeUndefined()
   const again = await pat.authorize({ pat: "pt-x" }).callback()
   expect(again.accountId).toBe("same-user")
 })
@@ -362,4 +364,7 @@ test("qoder-cn: an email account with a phone bound keeps its email, here and on
   expect(first.cardName).toBe("bob@example.com")
   const renewed = await hooks.auth.refresh({ ...first, type: "oauth", expires: Date.now() + 1_000 })
   expect(renewed.accountId).toBeUndefined()
+  // 卡片名也保持邮箱：续期不能把它换成手机号
+  expect(renewed.cardName).toBe("bob@example.com")
+  expect(renewed.phoneLabel).toBe("138****8000")
 })

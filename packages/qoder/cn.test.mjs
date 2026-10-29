@@ -316,7 +316,7 @@ test("qoder-cn: a device sign-in names the card by the phone (review #487, E)", 
   const hooks = await QoderCNAuthPlugin({ client: store().client })
   const flow = await hooks.auth.methods[0].authorize()
   const cred = await flow.callback()
-  // accountId 保持 main 的算法（Qoder CN 的 uuid），卡片名走 cardName
+  // accountId stays main's computation (Qoder CN's uuid); the card's name is cardName
   expect(cred.accountId).toBe("u-p")
   expect(cred.phoneLabel).toBe("138****8000")
   expect(cred.cardName).toBe("138****8000")
