@@ -860,8 +860,6 @@ async function toSuccessAuth(access, refresh, extra = {}) {
   const uid = extractUserId(claims)
   const name = extractDisplayName(claims)
   const expires = jwtExpiryMs(access)
-  // `accountId` is what the card shows: the phone when the account has one,
-  // else the JWT's own name, else the id. `uid` stays the id.
   const phone = await accountPhoneOf(access)
   return {
     type: "success",
@@ -876,7 +874,6 @@ async function toSuccessAuth(access, refresh, extra = {}) {
     ...(phone ? { phone, cardName: phone } : {}),
     uid: uid || "",
     ...(name ? { name } : {}),
-    ...(phone ? { phone } : {}),
     ...extra,
   }
 }
@@ -1000,7 +997,6 @@ function desktopSignIn() {
         accountId: d.name || PROVIDER_NAME,
         ...(phone ? { phone, cardName: phone } : {}),
         uid: d.uid || "",
-        ...(phone ? { phone } : {}),
       }
     },
   }

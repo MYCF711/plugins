@@ -299,7 +299,8 @@ test("the name usage puts on the card is the phone, not the JWT's name (review #
     "GET /api/web/points/v1/bills": () => Response.json({ code: 0, data: { items: [] } }),
   })
   const hooks = await RaccoonAuthPlugin({ client: {} })
-  // magpie 用 usage 的 user 覆盖卡片名；JWT 的 name 也在记录里，手机号必须赢
+  // magpie shows usage's user as the card's name; the JWT's name is on the
+  // record too, and the phone must win
   const u = await hooks.auth.usage(async () => ({
     type: "oauth",
     access: validTok,
@@ -1117,7 +1118,7 @@ test("a 0.1.4-style record keeps its accountId on renewal and shows the phone (r
     uid: "7615755",
   }
   const renewed = await hooks.auth.refresh(old)
-  // 身份不动：续期不给 accountId
+  // the identity does not move: a renewal gives no accountId
   expect(renewed.accountId).toBeUndefined()
   expect(renewed.cardName).toBe("138****8000")
   const u = await hooks.auth.usage(async () => ({ ...old, ...renewed, access: "new-tok", expires: Date.now() + 86_400_000 }))
@@ -1129,6 +1130,12 @@ test("a desktop seat's refresh gives nothing, even when user_info answers a phon
     "/api/web/auth/v1/user_info": () => Response.json({ code: 0, data: { phone: "13800138000" } }),
   })
   const hooks = await RaccoonAuthPlugin({ client: {} })
-  const got = await hooks.auth.refresh({ type: "oauth", source: "desktop", access: "tok-desktop", expires: Date.now() + 1_000 })
+  const got = await hooks.auth.refresh({
+    type: "oauth",
+    source: "desktop",
+    access: "tok-desktop",
+    refresh: "D1",
+    expires: Date.now() + 1_000,
+  })
   expect(got).toBeUndefined()
 })
