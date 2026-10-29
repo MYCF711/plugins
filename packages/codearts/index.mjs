@@ -81,7 +81,8 @@ const IAM_HOST = "https://iam.cn-north-4.myhuaweicloud.com"
 const IAM_USER_URL = (userId) => `${IAM_HOST}/v3.0/OS-USER/users/${encodeURIComponent(userId)}`
 const IAM_TIMEOUT_MS = 8_000
 // The phone never changes for one IAM user, and the card asks often: one read
-// per account is enough, kept in memory for the life of the process.
+// per account is enough, kept in memory for IAM_PHONE_TTL_MS (a failed read
+// included, so a card refresh does not ask IAM again every time).
 const IAM_PHONE_TTL_MS = 6 * 60 * 60 * 1000
 // The daily free token pool a `maas_type: benefit` chat draws on (never the
 // credit packages), so a free model's spend shows up in the usage panel.
@@ -2543,9 +2544,9 @@ export const CodeArtsAuthPlugin = async ({ client } = {}, options = {}) => {
         const cred = credentialOf(auth)
         if (!cred) return undefined
         const renewed = await renewOnce(cred)
-        // A rotation rebuilds the credential: keep what only the stored one
-        // knows (`session_id`, the phone), and read the phone once for an
-        // account signed in before it was being read at all.
+        // A rotation rebuilds the credential: keep the phone, which only the
+        // stored one knows (`renewOnce` carries `session_id` itself), and read
+        // it once for an account signed in before it was being read at all.
         const next = {
           ...renewed,
           ...(cred.user_phone && !renewed.user_phone ? { user_phone: cred.user_phone } : {}),

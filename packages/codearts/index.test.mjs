@@ -2462,20 +2462,45 @@ test("a code STS turns down sends the browser to the portal's failure page", asy
 
 test("auth.refresh keeps a named account's identity and gives an unnamed one the URN (review #483)", async () => {
   const urn = "iam::d:user:hw123"
-  const profiled = credWithProfile({ principal_urn: urn })
+  const profiled = credWithProfile({ principal_urn: urn, principal_id: "pid-1" })
   const cred = { ...(await makeCred()), refresh_token: profiled.refresh_token }
-  const fetcher = async () =>
-    new Response(JSON.stringify({
+  const fetcher = async (url) =>
+    String(url).includes("iam.cn-north-4")
+      ? new Response(JSON.stringify({ user: { phone: "0086-13800138000" } }), { status: 200 })
+      : new Response(JSON.stringify({
       credentials: { access_key_id: "AK2", secret_access_key: "SK2", security_token: "ST2", expiration: "2031-01-01T00:00:00Z" },
       refresh_token: profiled.refresh_token,
     }), { status: 200 })
   const plugin = await CodeArtsAuthPlugin({ client: {} }, { fetch: fetcher })
 
-  // 已存 accountId 的账号：续期不改身份
+  // an account that has an accountId: a renewal does not rename it
   const named = await plugin.auth.refresh({ ...makeAuth(cred), accountId: urn })
   assert.equal(named.accountId, undefined)
+  // the phone is read on the renewal and kept on the credential
+  assert.equal(JSON.parse(named.access).user_phone, "138****8000")
 
-  // 没有 accountId 的账号：续期补上 URN（否则重登会多一行）
+  // an account without one: the renewal gives it the URN (else a re-sign-in
+  // would add a second row)
   const unnamed = await plugin.auth.refresh(makeAuth(cred))
   assert.match(String(unnamed.accountId ?? ""), /^iam::/)
+  assert.equal(JSON.parse(unnamed.access).user_phone, "138****8000")
+})
+
+test("a sign-in names the account by its URN while the card shows the phone (review #483)", async () => {
+  const b64u = (o) => Buffer.from(JSON.stringify(o)).toString("base64url")
+  const urn = "iam::d1:user:hw123"
+  const rt = `h.${b64u({ user_profile: JSON.stringify({ principal_urn: urn, principal_id: "pid-1", account_name: "hw123" }) })}.s`
+  const fetcher = async (url) =>
+    String(url).includes("iam.cn-north-4")
+      ? new Response(JSON.stringify({ user: { phone: "0086-13800138000" } }), { status: 200 })
+      : new Response(stsBody("AK", rt), { status: 200 })
+  const plugin = await CodeArtsAuthPlugin({ client: {} }, { fetch: fetcher })
+  const a = await plugin.auth.methods[0].authorize()
+  const done = a.callback()
+  const port = new URL(a.url).searchParams.get("port")
+  await fetch(`http://127.0.0.1:${port}${x.REDIRECT_PATH}?code=C1`, { redirect: "manual" })
+  const out = await done
+  // accountId is the identity (the URN); the phone is on the credential
+  assert.equal(out.accountId, urn)
+  assert.equal(JSON.parse(out.access).user_phone, "138****8000")
 })
