@@ -520,14 +520,45 @@ function profileOf(cred) {
  * `iam::<domain>:user:<name>`, an ID nobody can tell apart from another
  * account's. `user_phone` (read from IAM after sign-in, see
  * `fetchAccountPhone`) stands in front of them when it is there.
+ *
+ * `id` is the identity (the URN) and keeps every IAM shape; `name` is only
+ * what a person can read. When the claim carries no such value, `name` is
+ * empty and the host falls back to the provider's name — an IAM id is never
+ * the name (the `accountId` / `uid` rule in magpie-plugin-scaffold, #27).
  */
 function accountIdentityOf(cred) {
   const legacy = { id: firstOf(cred?.user_name, cred?.user_id), name: firstOf(cred?.user_name) }
   const profile = profileOf(cred)
-  if (!profile) return { ...legacy, name: firstOf(cred?.user_phone, legacy.name) }
+  if (!profile) return { ...legacy, name: displayNameOf(cred?.user_phone, legacy.name) }
   const id = firstOf(profile.principal_urn, profile.account_name, profile.account_id, profile.user_id, legacy.id)
-  const name = firstOf(cred?.user_phone, profile.user_name, profile.account_name, profile.domain_name, legacy.name)
+  const name = displayNameOf(cred?.user_phone, profile.user_name, profile.account_name, profile.domain_name, legacy.name)
   return { id, name }
+}
+
+// What IAM writes in place of a name: `iam::<domain>:user:<name>`, a `urn:…`,
+// the bare 32-character domain id, the account's `hw…` name, or a uuid. The
+// shapes are read as IDs wherever they appear; none of them is a name.
+const IDENTIFIER_PATTERNS = [
+  /::/, // iam::<domain>:user:<name> / arn:…
+  /^urn:/i, // urn:…
+  /^hw[0-9a-f]{6,}$/i, // Huawei IAM account name, e.g. hw123456789012345
+  /^[0-9a-f]{8}-[0-9a-f]{4}-/i, // uuid
+  /^[0-9a-f]{16,}$/i, // bare hash, incl. the 32-character domain id
+]
+
+/** Does this value look like an internal ID rather than a display name? */
+function looksLikeIdentifier(value) {
+  const s = String(value ?? "").trim()
+  return !!s && IDENTIFIER_PATTERNS.some((re) => re.test(s))
+}
+
+/** The first candidate that a person can tell apart from another account. */
+function displayNameOf(...candidates) {
+  for (const candidate of candidates) {
+    const name = firstOf(candidate)
+    if (name && !looksLikeIdentifier(name)) return name
+  }
+  return ""
 }
 
 /**
@@ -2806,7 +2837,7 @@ export const _internal = {
   generatePkcePair, generateDpopKeyPair, keyPairFromStoredJwk, signDpopJws,
   buildCanonicalRequest, signRequestHuawei,
   credentialFromTokenResponse, credentialOf, expiresFromCredential, accountIdentityOf, accountSessionIds,
-  profileOf, maskPhone, fetchAccountPhone, accountPhoneField, IAM_HOST, IAM_USER_URL,
+  profileOf, looksLikeIdentifier, maskPhone, fetchAccountPhone, accountPhoneField, IAM_HOST, IAM_USER_URL,
   requestToken, exchangeAuthorizationCode, exchangeRefreshToken, refreshCredential,
   isDeadRefreshToken, isPermanentRefreshFailure, nearExpiry, persistCredential,
   buildOAuthLoginUrl, buildPortalLoginResultUrl,

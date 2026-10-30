@@ -295,6 +295,39 @@ test("accountIdentityOf names an account by its phone, never by IAM's ids", () =
   assert.deepEqual(x.accountIdentityOf({ refresh_token: token }), { id: "iam::d1:user:hw12323", name: "hw12323" })
 })
 
+test("accountIdentityOf never makes an IAM id the account's name", () => {
+  const b64u = (o) => Buffer.from(JSON.stringify(o)).toString("base64url")
+  const urn = "iam::d1:user:hw123456789012345"
+  // The claim names the signer only by its IAM ids. With no phone read there is
+  // no name to show: `id` keeps the URN, `name` is empty (the host falls back
+  // to the provider's name) — never the URN.
+  for (const profile of [
+    { principal_urn: urn, user_name: urn, account_name: urn, domain_name: urn },
+    { principal_urn: urn, user_name: "hw123456789012345" },
+  ]) {
+    const token = `h.${b64u({ user_profile: JSON.stringify(profile) })}.s`
+    assert.deepEqual(x.accountIdentityOf({ refresh_token: token }), { id: urn, name: "" })
+  }
+  // A credential without a `user_profile` is the same: `id` is the URN, and
+  // `user_name` is not a name.
+  assert.deepEqual(x.accountIdentityOf({ refresh_token: "opaque", user_name: urn }), { id: urn, name: "" })
+})
+
+test("looksLikeIdentifier spots the shapes IAM writes, and leaves names alone", () => {
+  for (const id of [
+    "iam::d1:user:hw123456789012345",
+    "urn:ietf:params:oauth:jwt",
+    "0123456789abcdef0123456789abcdef",
+    "123e4567-e89b-12d3-a456-426614174000",
+    "hw123456789012345",
+  ]) {
+    assert.equal(x.looksLikeIdentifier(id), true, id)
+  }
+  for (const name of ["alice", "138****8000", "a@b.com", "", "hw123"]) {
+    assert.equal(x.looksLikeIdentifier(name), false, name)
+  }
+})
+
 test("fetchAccountPhone reads IAM with the account's own credentials, and only once", async () => {
   const seen = []
   const cred = credWithProfile({ principal_id: "uid-1" })
