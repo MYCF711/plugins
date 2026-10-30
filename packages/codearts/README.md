@@ -186,8 +186,9 @@ under **Settings → Usage → Plugins**.
   spent by *another* process before its push reached it fails its renewal and asks for the
   sign-in again rather than taking another record's credential. Two separate magpie processes
   renewing at the very same moment can still race; the loser asks again and is signed out only
-  if the token stays spent. Deleting one of the two records is not recommended: the other one's
-  next renewal writes its sibling back at the remembered key (delete both to remove the account).
+  if the token stays spent. A removed account stays removed: a provider listed with no accounts
+  forgets the keys this package wrote for it, so the other record's next renewal cannot write
+  the removed one back.
 - `officeace-auth` and this package cannot both serve the `officeace` provider id. Magpie asks
   which plugin serves it; remove the old one.
 

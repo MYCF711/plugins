@@ -663,8 +663,8 @@ function expiresFromCredential(cred) {
   return Date.now() + 86_400_000
 }
 
-/** POST the STS token endpoint with a DPoP proof. */
-async function requestToken(body, keyPair, fetcher) {
+/** POST the STS token endpoint with a DPoP proof; `label` is the card that asked. */
+async function requestToken(body, keyPair, fetcher, label = "CodeArts") {
   const dpop = await signDpopJws(keyPair, "POST", STS_TOKEN_ENDPOINT)
   let response
   try {
@@ -677,7 +677,7 @@ async function requestToken(body, keyPair, fetcher) {
       signal: AbortSignal.timeout(TOKEN_TIMEOUT_MS),
     })
   } catch (e) {
-    throw new Error(`CodeArts token request network error: ${String(e)}`)
+    throw new Error(`${label} token request network error: ${String(e)}`)
   }
   let data = null
   try {
@@ -686,7 +686,7 @@ async function requestToken(body, keyPair, fetcher) {
     data = null
   }
   if (!response.ok || !data?.credentials) {
-    const message = `CodeArts token request failed: ${response.status}${data ? ` ${JSON.stringify(data)}` : ""}`
+    const message = `${label} token request failed: ${response.status}${data ? ` ${JSON.stringify(data)}` : ""}`
     // Only refresh_token invalidation is terminal; a transient DPoP rejection
     // must not permanently mark the account.
     if (data?.error === "invalid_grant" || isDeadRefreshToken(message)) {
@@ -708,14 +708,14 @@ function isDeadRefreshToken(text) {
 
 const isPermanentRefreshFailure = (e) => e?.signIn === "expired" || isDeadRefreshToken(e?.message ?? e)
 
-function exchangeAuthorizationCode(code, codeVerifier, port, keyPair, fetcher) {
+function exchangeAuthorizationCode(code, codeVerifier, port, keyPair, fetcher, label = "CodeArts") {
   return requestToken({
     client_id: CLIENT_ID,
     code,
     code_verifier: codeVerifier,
     grant_type: GRANT_AUTHORIZATION_CODE,
     redirect_uri: `http://127.0.0.1:${port}${REDIRECT_PATH}`,
-  }, keyPair, fetcher)
+  }, keyPair, fetcher, label)
 }
 
 function exchangeRefreshToken(refreshToken, codeVerifier, keyPair, fetcher) {
@@ -783,7 +783,7 @@ const buildPortalLoginResultUrl = (ok) =>
  * the sign-in at once, with the portal's own words when it gave any. The
  * redirect target is always that page, never a parameter of the request.
  */
-function startOAuthCallbackServer(pkce, keyPair, fetcher) {
+function startOAuthCallbackServer(pkce, keyPair, fetcher, label = "CodeArts") {
   let resolveResult
   let rejectResult
   const result = new Promise((resolve, reject) => {
@@ -819,7 +819,7 @@ function startOAuthCallbackServer(pkce, keyPair, fetcher) {
       return
     }
     const port = request.socket.localPort ?? 0
-    void exchangeAuthorizationCode(code, pkce.codeVerifier, port, keyPair, fetcher).then(
+    void exchangeAuthorizationCode(code, pkce.codeVerifier, port, keyPair, fetcher, label).then(
       (token) => {
         response.writeHead(307, { Location: buildPortalLoginResultUrl(true) }).end()
         const cred = credentialFromTokenResponse(token, pkce.codeVerifier, keyPair)
@@ -871,10 +871,10 @@ function listenOnCallbackPort(server) {
  * The result resolves once the browser is redirected back and STS answers;
  * the callback server is closed as soon as the result settles.
  */
-async function startOAuthFlow(fetcher) {
+async function startOAuthFlow(fetcher, label = "CodeArts") {
   const pkce = await generatePkcePair()
   const keyPair = await generateDpopKeyPair()
-  const { port, server, result } = await startOAuthCallbackServer(pkce, keyPair, fetcher)
+  const { port, server, result } = await startOAuthCallbackServer(pkce, keyPair, fetcher, label)
   // The authorize URL carries a ticket_id as the IDE's does; the code flow
   // itself never reads it back.
   const loginUrl = buildOAuthLoginUrl(port, pkce, randomHex(32))
@@ -2611,7 +2611,7 @@ export const CodeArtsAuthPlugin = async ({ client } = {}, options = {}) => {
         const cred = credentialOf(auth)
         if (!cred?.access_key_id) {
           // A models hook that runs with no auth is a provider with no accounts.
-          noteProviderEmpty(PROVIDER)
+          noteProviderEmpty(PROVIDER, recordsPath)
           return provider.models
         }
         const identity = accountIdentityOf(cred).id
@@ -3653,11 +3653,6 @@ const sharedAccountKeys = new Map()
 const seenProviderAccounts = new Map()
 /** refresh chain → { from, promise }: the renewal in flight. */
 const renewalGates = new Map()
-// `liveAccounts` was the ledger of "the newest credential seen for an account"
-// — what handed one record another chain's credential (review of #522). It is
-// gone; the name stays an alias of the gate, so a test that resets process
-// state still resets something real.
-const liveAccounts = renewalGates
 /** refresh token → the lineage it belongs to (a rotation keeps its parent's). */
 const refreshLineages = new Map()
 /** How long a spent token's renewal stands in for it. */
@@ -3734,8 +3729,34 @@ function noteProviderAccount(provider, identity) {
 }
 
 /** The provider was listed with no account at all: it has none, as far as this process knows. */
-function noteProviderEmpty(provider) {
+function noteProviderEmpty(provider, recordsPath = "") {
   if (!seenProviderAccounts.has(provider)) seenProviderAccounts.set(provider, new Set())
+  // A provider with no accounts has none this package wrote either: forget the
+  // keys, or the next renewal of the other record would write a removed
+  // account back (the host's auth.set creates a record that isn't there).
+  forgetRecordKeys(recordsPath, provider)
+}
+
+/** Forget every key this package remembered for `provider`'s records. */
+function forgetRecordKeys(file, provider) {
+  const prefix = `${provider}\n`
+  for (const k of [...sharedAccountKeys.keys()]) {
+    if (k.startsWith(prefix)) sharedAccountKeys.delete(k)
+  }
+  if (!file) return
+  try {
+    const all = readRecordKeys(file)
+    let gone = false
+    for (const k of Object.keys(all)) {
+      if (k.startsWith(prefix)) {
+        delete all[k]
+        gone = true
+      }
+    }
+    if (gone) writeLedger(file, all)
+  } catch {
+    /* best effort: an unwritable file only means the key is forgotten next time */
+  }
 }
 
 /**
@@ -3858,13 +3879,13 @@ async function renewOfficeAceCredential(cred, fetcher = fetch) {
         client_id: CLIENT_ID,
         code_verifier: firstOf(cred.code_verifier),
         grant_type: GRANT_REFRESH_TOKEN,
-        refresh_token: cred.refresh_token,
-      }, keyPair, fetcher)
+        refresh_token: firstOf(cred.refresh_token),
+      }, keyPair, fetcher, "OfficeAce")
     : await requestToken({
         client_id: OA_AGENTARTS_CLIENT_ID,
         grant_type: GRANT_REFRESH_TOKEN,
-        refresh_token: cred.refresh_token,
-      }, keyPair, fetcher)
+        refresh_token: firstOf(cred.refresh_token),
+      }, keyPair, fetcher, "OfficeAce")
   const next = credentialFromTokenResponse(token, firstOf(cred.code_verifier), keyPair)
   // What a rotation does not rebuild: the account's one upstream session, its
   // identity, its phone and the MaaS credentials behind the preserved appKey.
@@ -3966,7 +3987,7 @@ export const OfficeAceAuthPlugin = async ({ client } = {}, options = {}) => {
           // is only ever written by a sign-in (this card's, or the CodeArts
           // card's beside it) — an account the user signed out of must not come
           // back on the next listing.
-          noteProviderEmpty(OFFICEACE_PROVIDER)
+          noteProviderEmpty(OFFICEACE_PROVIDER, recordsPath)
           return provider.models
         }
         const identity = accountIdentityOf(cred).id
@@ -4031,7 +4052,7 @@ export const OfficeAceAuthPlugin = async ({ client } = {}, options = {}) => {
            * `authorize()` returns at once; the waiting happens in `callback()`.
            */
           async authorize() {
-            const flow = await startOAuthFlow(fetcher)
+            const flow = await startOAuthFlow(fetcher, "OfficeAce")
             return {
               url: flow.loginUrl,
               instructions:
@@ -4218,7 +4239,7 @@ export const _officeace = {
   accountKeySuffix, recordKeyFor, writeSharedRecord, pushSharedRecord,
   refreshClientOf, refreshChainOf, refreshLineages, lineageOf, linkRotation, rememberLineage,
   noteProviderAccount, noteProviderEmpty, seenProviderAccounts,
-  liveAccounts, sharedAccountKeys, renewalGates, withOfficeAceMaas, persistOfficeAceRecord,
+  sharedAccountKeys, renewalGates, withOfficeAceMaas, persistOfficeAceRecord,
   OFFICEACE_ICON,
 }
 
