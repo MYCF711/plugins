@@ -1,7 +1,7 @@
 {
   "name": "@magpie-community/opencode-codearts-auth",
   "version": "0.3.0",
-  "description": "Huawei Cloud in OpenCode and magpie: CodeArts (码道) and OfficeAce (AgentArts) from one Huawei Cloud OAuth sign-in — models, credit rates, credit usage and the daily check-in (unofficial)",
+  "description": "Huawei Cloud in OpenCode and magpie: CodeArts (码道) and OfficeAce (AgentArts), each from its own Huawei Cloud OAuth sign-in — models, credit rates, credit usage and the daily check-in (unofficial)",
   "type": "module",
   "main": "./index.mjs",
   "exports": "./index.mjs",

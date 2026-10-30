@@ -1,16 +1,19 @@
 # @magpie-community/opencode-codearts-auth
 
-Signs in to **Huawei Cloud** once and serves two providers in OpenCode and magpie:
+Signs in to **Huawei Cloud** and serves two providers in OpenCode and magpie:
 
 - **CodeArts** (华为云码道, the CodeArts Agent coding plans: Trial, personal and enterprise
   credit plans) — provider id `codearts`: GLM, DeepSeek, openPangu and more.
 - **OfficeAce** (华为云 AgentArts / MaaS) — provider id `officeace`: GLM, DeepSeek, Qwen, Kimi
   and 盘古 models, its credit buckets and its daily check-in.
 
-One Huawei Cloud IAM account, one sign-in: the STS credentials one sign-in yields sign both
-vendors' APIs (measured, see below), so signing in at either card signs in the other. OfficeAce
-was its own package (`officeace-auth`) until 0.3.0; accounts signed in there are read from where
-magpie already keeps them and keep working — no second sign-in.
+Each card signs in on its own: the two providers hold separate records with separate Huawei Cloud
+refresh tokens, because an STS refresh token is spent once — two records sharing one would sign
+each other out. The same Huawei Cloud IAM account works for both, and a credential issued for one
+endpoint also signs the other vendor's API (measured, see below), so signing in twice costs two
+clicks and nothing else. OfficeAce was its own package (`officeace-auth`) until 0.3.0; accounts
+signed in there are read from where magpie already keeps them and keep working — no second
+sign-in for those.
 
 > **Unofficial.** This package is not affiliated with, authorized or endorsed by Huawei,
 > Huawei Cloud or CodeArts; their names and marks belong to their owners. It talks to the
@@ -23,7 +26,7 @@ magpie already keeps them and keep working — no second sign-in.
 
 ```sh
 magpie plugin add @magpie-community/opencode-codearts-auth
-magpie plugin login codearts      # one sign-in; the OfficeAce card gets the same account
+magpie plugin login codearts      # CodeArts; the OfficeAce card signs in separately
 ```
 
 or install it from magpie's Plugins tab and sign in there. **Coming from `officeace-auth`?**
@@ -119,13 +122,14 @@ signing in, a short built-in catalog stands in.
 
 ## OfficeAce (the second provider)
 
-**Signing in once.** The officeace card offers the same 「Sign in with Huawei Cloud」 as the
-CodeArts card, because it is the same credential: a CodeArts STS triple signs OfficeAce's
-subscription API (V11-HMAC) and passes its CLAW permission check, and an OfficeAce triple signs
-CodeArts' `snap-access` calls. A sign-in at either card writes both records — the one magpie
-saves for the provider signed in at, and the other provider's, in that provider's own shape.
-A record written this way lives at `<provider>#<hash of the account's identity>`, so signing in
-at that provider's own card later lands on the same account instead of adding a second one.
+**Signing in.** The officeace card offers the same 「Sign in with Huawei Cloud」 as the CodeArts
+card, and it is the same account system: a CodeArts STS triple signs OfficeAce's subscription API
+(V11-HMAC) and passes its CLAW permission check, and an OfficeAce triple signs CodeArts'
+`snap-access` calls. But the two cards keep **separate records with separate refresh tokens** —
+a sign-in writes only the card it was made on. A Huawei Cloud refresh token is spent once, so two
+records holding one token would each sign the other out at its next renewal; one record per
+sign-in is what keeps a CodeArts-only user from being asked to sign in again because of the
+OfficeAce card. Sign in on the OfficeAce card to get an OfficeAce account.
 A sign-in is the only thing that creates an OfficeAce account: a listing never adopts one from
 another provider's record, so an account the user signed out of cannot come back by itself.
 
@@ -217,8 +221,10 @@ measurements and code of [HuHong-Tao](https://github.com/yuweihao17/codearts/pul
 - **OfficeAce（华为云 AgentArts / MaaS）**：GLM、DeepSeek、Qwen、Kimi、盘古等模型，分桶积分与每日签到。
   provider id：`officeace`。
 
-同一次登录换到的 STS 凭据对两家的接口都有效（已实测，见下），所以在任一张卡片上登录，另一张也就登录了。
-OfficeAce 在 0.3.0 之前是独立的 `officeace-auth` 包：那些账号按 magpie 原有的位置与形状读取，**不用重新登录**。
+两张卡各自登录：两个 provider 各持一条记录、各有一个华为云 refresh token —— STS 的 refresh token 只能用一次，
+两条记录共用一个 token 会互相把对方注销。同一个华为云 IAM 账号对两家都有效，且一次登录换到的凭据对两家的接口都能用
+（已实测，见下），所以「登两次」只是多点一次，不会有别的不便。OfficeAce 在 0.3.0 之前是独立的 `officeace-auth` 包：
+那些账号按 magpie 原有的位置与形状读取，**不用重新登录**。
 
 > **非官方插件**：与华为、华为云及 CodeArts（码道）没有任何关联，也未获其授权或认可。插件调用的是
 > 码道客户端使用的非公开接口，并以与官方客户端相同的方式标识自己（含自动领取每日免费权益与签到），
@@ -244,12 +250,13 @@ OfficeAce 在 0.3.0 之前是独立的 `officeace-auth` 包：那些账号按 ma
   （这部分仍在用更多账号验证，请以控制台为准）。`auth.checkin` 与客户端「限时福利 → 每日领取」一致
   （插件领取后确认失败的，当天记在签到账本里，下次签到时补确认；客户端本就不确认的 `id: null` 领取不会被确认），
   在 **设置 → 用量 → Plugins** 打开「每日自动签到」即可。
-- **OfficeAce（第二个供应商）**：officeace 卡片提供与 CodeArts 卡片相同的「华为云登录」，因为它是同一份凭据：
+- **OfficeAce（第二个供应商）**：officeace 卡片提供与 CodeArts 卡片相同的「华为云登录」，账号体系是同一套：
   码道的 STS 三元组能签 OfficeAce 的订阅接口（V11-HMAC）并通过它的 CLAW 权限校验，反之 OfficeAce 的三元组也能签
-  码道的 `snap-access` 接口。在任一张卡片登录都会写出**两条记录**（magpie 保存当前供应商的那条，插件写另一家的，
-  各自用它自己的形状）；这样写出的记录放在 `<provider>#<账号身份哈希>` 上，之后在该供应商自己的卡片登录会合并到
-  同一账号，而不是多出一行。**只有登录会创建 OfficeAce 账号**：列模型时不会从另一家的记录「带入」一个账号，
-  用户登出的账号不会自己回来。老 `officeace-auth` 的记录原样读取：provider id 相同、`access` 里的 JSON 形状相同，
+  码道的 `snap-access` 接口。但**两张卡各写各的记录、各持自己的 refresh token**——一次登录只写当前这张卡的记录。
+  华为云的 refresh token 只能用一次，两条记录共用一个 token 会让 CodeArts 用户因为 OfficeAce 那条记录续期而被要求
+  重新登录；一条记录一次登录才是对的。要用 OfficeAce 就在 OfficeAce 卡片上登录。记录放在
+  `<provider>#<账号身份哈希>` 上，之后再登同一账号会合并，不会多出一行。**只有登录会创建 OfficeAce 账号**：
+  列模型时不会从另一家的记录「带入」一个账号，用户登出的账号不会自己回来。老 `officeace-auth` 的记录原样读取：provider id 相同、`access` 里的 JSON 形状相同，
   续期仍走它签发时的 OAuth 客户端（`pdp5_for_agentarts`）。
 - **账号名与续期边界**：`accountId` 用厂商自己的稳定 id（IAM 域名 id，与老 `officeace-auth` 记录里的一致），
   **绝不是打码手机号**（#483、magpie#4416；magpie 把用户给账号起的名字、代理、网关 key 都挂在 `accountId` 上，
@@ -257,9 +264,9 @@ OfficeAce 在 0.3.0 之前是独立的 `officeace-auth` 包：那些账号按 ma
   `officeace-auth` 0.1.14 存下的手机号），只在该值为空时才补一个。新登录写的 `accountId` 是域名 id。
   续期只花**这条记录自己的 refresh token**：协调单位是「refresh chain = 签发它的 OAuth 客户端 + token 的血缘」
   （轮换后的新 token 记在父 token 同一血缘上，仍算同一条链）。
-  同一次登录写出的两条记录持有同一个 token，算同一条链，一个进程内只花一次；老 `officeace-auth` 记录与码道记录
-  是两个 token（`pdp5_for_agentarts` 与 `codearts-agent`），各花各的，各自保留自己的 MaaS 凭据，续期失败就是失败，
-  绝不会借用另一条记录的凭据；先续期的那条记录仍会把新凭据推给本包写过的另一条。
+  每条记录都有自己的 token：码道记录由 `codearts-agent` 签发，OfficeAce 记录由 `pdp5_for_agentarts` 签发，各花各的，
+  各自保留自己的 MaaS 凭据；**续期只写被续的那条记录，绝不写另一条**（`auth.set` 会把不存在的账号创建出来），
+  续期失败就是失败，绝不借用另一条链的凭据。
 - **OfficeAce 的模型**：目录 `/v2/models` 是注册表（26 条，多数对话时回 `404 ModelArts.81009 Invalid model`），
   插件只保留计费清单（`/v1/model-token-rates`，9 条）里的，并永不列出三个实测必 404 的 id；倍率表读取失败时保留上
   一份好表（空表会让不可调的 id 全部回到用户面前）；未登录时用 10 个内置模型兜底。模型名带上倍率（`GLM-5.3 · x0.18`），
@@ -271,9 +278,9 @@ OfficeAce 在 0.3.0 之前是独立的 `officeace-auth` 包：那些账号按 ma
 - **OfficeAce 的用量与签到**：`/v1/subscription` 的套餐桶（`skus[].quotas`）与活动桶（`bonus_skus`）转成 magpie 的窗口；
   `.trial` 桶没有到期时间就不显示；已过期的桶收进折叠区（`aside`）且不参与路由。签到是每个北京自然日一次
   `POST /v1/subscription/bonus/claim`：2xx 但 `bonus_skus` 为空是「今日已无新增可领」（`done`），不是失败。
-- **已知限制**：STS 的 refresh_token 只能用一次，同一次登录写出的两条记录共用同一个 token。先续期的一方拿到新 token；
-  **另一条记录下次续期会失败（`STS5.1806`）并要求重新登录**。这是「续期绝不写另一条记录」的代价，换来的是：
-  用户删掉的账号永远不会被写回来（无论它此前有没有被列出/使用过、有没有重启）。两个 magpie 进程同时续期仍可能撞车，
+- **已知限制**：STS 的 refresh_token 只能用一次。本包的每张卡各自登录、各自持有一条记录与一个 token，所以两张卡
+  互不影响；**续期只写被续的那条记录**，因此用户删掉的账号永远不会被写回来（无论它此前有没有被列出/使用过、
+  有没有重启）。老 `officeace-auth` 记录同样只按自己的链续期。两个 magpie 进程同时续期同一个账号仍可能撞车，
   输的一方重试，只有 token 一直是被消费状态才标记需重新登录。
   另外，`officeace-auth` 与本包不能同时服务 `officeace` 这个 provider id，magpie 会让你选一个，装之前先卸掉旧的。
 - **致谢**：原作者 [yuweihao17](https://github.com/yuweihao17/codearts)；HuHong-Tao、ReachForStar 的

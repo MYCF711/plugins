@@ -2795,11 +2795,10 @@ export const CodeArtsAuthPlugin = async ({ client } = {}, options = {}) => {
                     accountId: identity.id,
                     ...(identity.id ? { uid: identity.id } : {}),
                   }
-                  // One Huawei Cloud sign-in serves both providers: the OfficeAce
-                  // card is given this same account in its own record shape. The
-                  // two records then live on their own; a renewal writes only the
-                  // record it renews.
-                  await writeSharedRecord(client, OFFICEACE_PROVIDER, withMaas, fetcher)
+                  // This sign-in writes this card's record only. A Huawei Cloud
+                  // refresh token is spent once, so two records holding one
+                  // token would sign each other out; the other card has its own
+                  // sign-in and its own token.
                   await writeSharedRecord(client, PROVIDER, withMaas, fetcher)
                   return record
                 } catch (e) {
@@ -3586,12 +3585,12 @@ function officeAceDiagnose(status, renewal) {
 // record is never written to a key another account may sit at, and a record
 // that already holds the account is never written again.
 //
-// Two records of one account may hold the *same* refresh token (a sign-in
-// writes both from one credential), and then they are on one chain: renewing
-// once serves both. They may also hold different tokens — an `officeace-auth`
-// record has its own chain, issued to `pdp5_for_agentarts`, beside a CodeArts
-// record issued to `codearts-agent` — and those are two chains: each is only
-// ever renewed with its own token, and a failed renewal fails.
+// Each record holds its own refresh token: a sign-in writes this card's record
+// only, so the two cards of one account are two chains — an `officeace-auth`
+// record was issued to `pdp5_for_agentarts`, a CodeArts record to
+// `codearts-agent`. Each is only ever renewed with its own token, a renewal
+// writes no other record (the host's `auth.set` creates a record that is not
+// there), and a failed renewal fails instead of borrowing another chain's.
 
 /** provider id → the identities its accounts were seen as. */
 const seenProviderAccounts = new Map()
@@ -3955,7 +3954,7 @@ export const OfficeAceAuthPlugin = async ({ client } = {}, options = {}) => {
             return {
               url: flow.loginUrl,
               instructions:
-                "Sign in to Huawei Cloud in the browser. This one sign-in serves both OfficeAce and CodeArts; this window closes itself when done.",
+                "Sign in to Huawei Cloud in the browser. This signs in OfficeAce only — the CodeArts card has its own sign-in. This window closes itself when done.",
               method: "auto",
               async callback() {
                 try {
@@ -3967,10 +3966,8 @@ export const OfficeAceAuthPlugin = async ({ client } = {}, options = {}) => {
                   // The card's name (its phone), and OfficeAce's MaaS credentials.
                   const identified = { ...cred, ...(await accountPhoneField(cred, fetcher)) }
                   const withMaas = await withOfficeAceMaas(identified, fetcher)
-                  // One sign-in, two providers: the CodeArts card takes the same
-                  // account, and this card's record lands where a renewal can
-                  // find it again.
-                  await writeSharedRecord(client, PROVIDER, withMaas, fetcher)
+                  // This sign-in writes this card's record only — the two cards
+                  // never share a refresh token, which is spent once.
                   await writeSharedRecord(client, OFFICEACE_PROVIDER, withMaas, fetcher)
                   return { ...officeAceRecordBody(withMaas), type: "success" }
                 } catch (e) {
