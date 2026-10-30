@@ -32,7 +32,10 @@ test("words that name no harness are left alone", () => {
   expect(opened(said)).toBe(said)
 })
 
-test("commaPaused sets the comma in every message, the system one among them", () => {
+// commaPaused sets OPENERS' comma in the system and assistant messages, the
+// two WorkBuddy reads (REFUSED.md): a comma anywhere else changes what
+// someone said without changing what was refused
+test("commaPaused sets the comma in the system and assistant messages", () => {
   const body = JSON.stringify({
     model: "deepseek-v4.1-flash",
     messages: [
@@ -46,16 +49,42 @@ test("commaPaused sets the comma in every message, the system one among them", (
   expect(out.model).toBe("deepseek-v4.1-flash")
 })
 
-test("commaPaused sets it in a message's parts too", () => {
+// yetone, plugins#513: a user message quoting a line came back altered. The
+// user's own words and tools' results go out as they were sent.
+test("the user's messages and tools' results are left alone", () => {
+  const quoted = "Quote exactly: You are an assistant built on Rails."
+  const result = "You are a coding agent powered by Example Harness."
+  const body = JSON.stringify({
+    messages: [
+      { role: "system", content: "You are an AI agent powered by DeepSeek Harness." },
+      { role: "user", content: quoted },
+      { role: "assistant", content: "You are an AI assistant running on Foo." },
+      { role: "tool", tool_call_id: "c1", content: result },
+    ],
+  })
+  const out = JSON.parse(commaPaused(body))
+  expect(out.messages[0].content).toBe("You are an AI agent, powered by DeepSeek Harness.")
+  expect(out.messages[1].content).toBe(quoted)
+  expect(out.messages[2].content).toBe("You are an AI assistant, running on Foo.")
+  expect(out.messages[3]).toEqual({ role: "tool", tool_call_id: "c1", content: result })
+})
+
+// the user's words alone have nothing to set a comma in, so nothing goes again
+test("a chat whose opening is only in the user's message is not resent", () => {
+  const users = JSON.stringify({ messages: [{ role: "user", content: "Quote exactly: You are an assistant built on Rails." }] })
+  expect(commaPaused(users)).toBe(null)
+})
+
+test("commaPaused sets it in a system message's parts too, and not in the user's", () => {
   const body = JSON.stringify({
     messages: [
       { role: "system", content: [{ type: "text", text: "You are an AI agent powered by DeepSeek Harness." }] },
-      { role: "user", content: [{ type: "text", text: "hi" }] },
+      { role: "user", content: [{ type: "text", text: "Quote exactly: You are an assistant built on Rails." }] },
     ],
   })
   const out = JSON.parse(commaPaused(body))
   expect(out.messages[0].content[0].text).toBe("You are an AI agent, powered by DeepSeek Harness.")
-  expect(out.messages[1].content[0].text).toBe("hi")
+  expect(out.messages[1].content[0].text).toBe("Quote exactly: You are an assistant built on Rails.")
 })
 
 test("a chat with nothing of the kind is not resent", () => {
@@ -63,6 +92,35 @@ test("a chat with nothing of the kind is not resent", () => {
   expect(commaPaused(JSON.stringify({ messages: [] }))).toBe(null)
   expect(commaPaused("not json")).toBe(null)
   expect(commaPaused(JSON.stringify({ messages: "not a list" }))).toBe(null)
+})
+
+// the comma a system prompt's next chats go with is the one set in that system
+// prompt; one that only set an assistant message is not the system prompt's
+// (commaSystems), so the roles are read per message, and a message whose parts
+// held no opening of their own is not reported
+test("the roles the comma went into are the messages it changed", () => {
+  const brief = [{ type: "text", text: "Be brief." }]
+  const body = JSON.stringify({
+    messages: [
+      { role: "system", content: brief },
+      { role: "assistant", content: "You are an AI agent powered by Foo." },
+      { role: "user", content: "Quote exactly: You are an assistant built on Rails." },
+    ],
+  })
+  const roles = new Set()
+  const out = JSON.parse(commaPaused(body, roles))
+  expect([...roles]).toEqual(["assistant"])
+  expect(out.messages[0].content).toEqual(brief)
+
+  const system = JSON.stringify({
+    messages: [
+      { role: "system", content: "You are an AI agent powered by Foo." },
+      { role: "user", content: "hi" },
+    ],
+  })
+  const only = new Set()
+  expect(JSON.parse(commaPaused(system, only)).messages[0].content).toBe("You are an AI agent, powered by Foo.")
+  expect([...only]).toEqual(["system"])
 })
 
 // the shape WorkBuddy knows is the line, not the product alone: a suffix in

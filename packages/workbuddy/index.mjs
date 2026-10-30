@@ -1026,32 +1026,59 @@ function opened(text) {
   return text
 }
 
-// commaPaused is body with OPENERS' comma set in every message, the system
-// messages among them: a refused chat's words are the system prompt's most
-// often. It is tried before systemAsUser, which takes the system prompt out
-// of the slot an agent's instructions are read in. null when there was
-// nothing to set a comma in.
-function commaPaused(body) {
+// commaPaused is body with OPENERS' comma set in its system and assistant
+// messages — the two WorkBuddy reads (REFUSED.md). The user's messages and
+// tools' results are not among them: a comma in a message the vendor never
+// matches changes what someone said without changing what was refused, and
+// the user's own words come back altered. It is tried before systemAsUser,
+// which takes the system prompt out of the slot an agent's instructions are
+// read in. null when there was nothing to set a comma in.
+//
+// The two roles are read off the message's own role: a message with no role,
+// or one of another kind, is left as it is. roles, when given, collects the
+// roles the comma went into — the caller uses it to tell a comma that made a
+// chat pass in its system prompt from one that only set an assistant
+// message's (commaSystems).
+const PAUSED_ROLES = new Set(["system", "assistant"])
+
+function commaPaused(body, roles) {
   const b = chatOf(body)
-  if (!Array.isArray(b?.messages)) return null
+  return commaPausedOn(b, roles) ? JSON.stringify(b) : null
+}
+
+// commaPausedOn makes commaPaused's change on a chat's object, in place; false
+// when there was nothing to set a comma in. commaPaused is this on a body, and
+// the first send of a system prompt whose comma passed is this too
+// (commaSystems), so the two can never drift apart.
+function commaPausedOn(b, roles) {
+  const msgs = b?.messages
+  if (!Array.isArray(msgs)) return false
   let changed = false
-  for (const m of b.messages) {
-    if (typeof m?.content === "string") {
+  for (const m of msgs) {
+    if (!PAUSED_ROLES.has(m?.role)) continue
+    let mine = false
+    if (typeof m.content === "string") {
       const t = opened(m.content)
-      if (t === m.content) continue
-      m.content = t
-      changed = true
+      if (t !== m.content) {
+        m.content = t
+        mine = true
+      }
     } else if (Array.isArray(m.content)) {
       for (const p of m.content) {
         if (typeof p?.text !== "string") continue
         const t = opened(p.text)
         if (t === p.text) continue
         p.text = t
-        changed = true
+        mine = true
       }
     }
+    // a message whose parts held no opening of their own is not changed, and
+    // is not reported as one that was
+    if (!mine) continue
+    changed = true
+    roles?.add(m.role)
   }
-  return changed ? JSON.stringify(b) : null
+  return changed
 }
 
 // normalizeToolChoice converts the object form emitted by OpenAI clients to
@@ -3086,6 +3113,13 @@ function makePlugin(site) {
   // the system prompts this run WorkBuddy refused as an unapproved channel:
   // their next chats go with systemAsUser at once, not refused first
   const refusedSystems = new Set()
+  // the system prompts this run WorkBuddy refused as written and took with
+  // OPENERS' comma: their next chats go with the comma set before the first
+  // send, as a moved one goes moved. Without it every turn of that agent —
+  // and every step of its tool loop — pays a refused round trip first, which
+  // is latency on each request and a pattern of channel refusals on the
+  // account. Bounded as refusedSystems is.
+  const commaSystems = new Set()
   return async ({ client, magpie }) => {
   // each account's list as last read, for FREE_ONLY: {at, list}
   const lists = new Map()
@@ -3336,6 +3370,10 @@ function makePlugin(site) {
             // words at once (see systemAsUser)
             const sysKey = native ? "" : systemKeyOf(chat)
             if (sysKey && refusedSystems.has(sysKey) && systemAsUserOn(chat)) changed = true
+            // a system prompt whose comma passed once goes with the comma
+            // set before the first send (see commaSystems), the way one
+            // refused before goes moved above
+            if (sysKey && commaSystems.has(sysKey) && commaPausedOn(chat)) changed = true
             // shaped is a body as such a model takes it. The first try's
             // is made on the chat already parsed, after the move above,
             // as shaped would make it of the body written; a resend with
@@ -3365,12 +3403,23 @@ function makePlugin(site) {
             if (res.status === 400 && !native) {              let text = await res.text()
               // the vendor may know a shape of the agent's opening that FLAGGED
               // doesn't: the same words said with one more comma pass it, and
-              // that is tried before the system prompt is moved out of its slot
-              const paused = REFUSED.test(text) ? commaPaused(body) : null
+              // that is tried before the system prompt is moved out of its slot.
+              // The roles the comma went into are kept: one set in the system
+              // prompt is what its next chats go with, one set in an assistant
+              // message alone says nothing about the next chat's.
+              const roles = new Set()
+              const paused = REFUSED.test(text) ? commaPaused(body, roles) : null
               if (paused) {
                 body = paused
                 res = await send(shaped(body))
                 if (res.status === 400) text = await res.text()
+                // not refused this time: the comma is what passed the
+                // vendor's check, so this system prompt's next chats go
+                // with it set before the first send
+                else if (sysKey && roles.has("system")) {
+                  commaSystems.add(sysKey)
+                  if (commaSystems.size > 256) commaSystems.delete(commaSystems.values().next().value)
+                }
               }
               const moved = res.status === 400 && REFUSED.test(text) && sysKey && !refusedSystems.has(sysKey) ? systemAsUser(body) : null
               if (moved) {
@@ -3603,4 +3652,4 @@ export const WorkBuddyAuthPlugin = makePlugin(SITES.workbuddy)
 export const WorkBuddyAIAuthPlugin = makePlugin(SITES["workbuddy-ai"])
 
 // for tests
-export const _internal = { idFor, replyAfterToolsOn, withDefaultEffort, defaultEffortOf, gzipped, FREE_ONLY, PRICE_TTL, keyAccount, remoteConfig, cycleOf, typeUnions, systemAsUser, systemKey, DEFAULT_SYSTEM, EDGE_READS, fitShape, replyAfterTools, AFTER_TOOLS_REFUSED, enterpriseUsageOf, accountName, notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, asReasoning, normalizeToolChoice, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, REFUSED_DOC, commaPaused, opened, freeCredits, creditsOf, priceOf, fresh, SITES, renewing, renewed, SESSION, attend, scopeOf, turnKey, conversationKey, signatureOf, isMessages, withoutUnsigned, withoutSignedThinking, prepared, answeredBefore, nativeOf, modelOf, configModels, freeWindowOf, tokensShort, freeWindowRows, freeWindowLedger, readLedgerTail, pinned, rowTime, rowAccount, ofAccount, windowOffset, windowReset, FREE_WINDOW_MODELS, FREE_WINDOW_SPAN, FREE_WINDOW_GAP, FREE_WINDOW_LEAD, checkinOf, API_MESSAGES: NPM_MESSAGES, API_CHAT: NPM }
+export const _internal = { idFor, replyAfterToolsOn, withDefaultEffort, defaultEffortOf, gzipped, FREE_ONLY, PRICE_TTL, keyAccount, remoteConfig, cycleOf, typeUnions, systemAsUser, systemKey, DEFAULT_SYSTEM, EDGE_READS, fitShape, replyAfterTools, AFTER_TOOLS_REFUSED, enterpriseUsageOf, accountName, notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, asReasoning, normalizeToolChoice, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, REFUSED_DOC, commaPaused, commaPausedOn, opened, freeCredits, creditsOf, priceOf, fresh, SITES, renewing, renewed, SESSION, attend, scopeOf, turnKey, conversationKey, signatureOf, isMessages, withoutUnsigned, withoutSignedThinking, prepared, answeredBefore, nativeOf, modelOf, configModels, freeWindowOf, tokensShort, freeWindowRows, freeWindowLedger, readLedgerTail, pinned, rowTime, rowAccount, ofAccount, windowOffset, windowReset, FREE_WINDOW_MODELS, FREE_WINDOW_SPAN, FREE_WINDOW_GAP, FREE_WINDOW_LEAD, checkinOf, API_MESSAGES: NPM_MESSAGES, API_CHAT: NPM }

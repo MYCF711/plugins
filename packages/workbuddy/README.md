@@ -174,15 +174,20 @@ default one, as the app does.
 
 WorkBuddy refuses some agents' identity lines as an "unapproved channel"
 (11128), so those lines are reworded before a chat goes out. Since 0.1.27
-(#279) that includes DeepSeek Harness's opening line. Since 0.2.2 a refusal
+(#279) that includes DeepSeek Harness's opening line. Since 0.2.3 a refusal
 of words not reworded yet is answered first by saying the same line with one
 more comma — a vendor matches such a line whole and exactly, so the comma
 passes it while the line still names the harness (measured 2026-10-30; a word
-added after the product name did not pass, the comma did). Only a chat refused
-still is sent once more, since 0.1.29, with the system prompt moved into the
-first user message (inside `<instructions>` tags) and WorkBuddy's default
-system prompt in its place: WorkBuddy checks only the system and assistant
-messages, and the line it matched is then in neither. A system message later
+added after the product name did not pass, the comma did). The comma is set in
+the system and assistant messages only — the two WorkBuddy reads — so the
+user's own words and tools' results go out as they were sent. A system prompt
+whose comma passed is remembered while the plugin is loaded, as a moved one
+is, and its next chats go with the comma already in before the first send:
+otherwise every turn, and every step of a tool loop, would pay the refusal
+once. Only a chat refused still is sent once more, since 0.1.29, with the
+system prompt moved into the first user message (inside `<instructions>` tags)
+and WorkBuddy's default system prompt in its place: WorkBuddy checks only the
+system and assistant messages, and the line it matched is then in neither. A system message later
 in the chat becomes a user message where it stands. The plugin remembers each
 refused system prompt while it is loaded, so that agent's next chats go moved
 at once. The move can't reach an assistant message, so words the model quotes
@@ -191,7 +196,7 @@ every message (since 0.1.30, the "Web GUI whose URL the runtime context names"
 line, #291); otherwise only a new chat clears it. A refusal that stands after
 the move ends in a hint that names no one client (since 0.1.28): WorkBuddy
 refused words in this client's prompt; use it from Hermes, OpenCode or Pi, or
-add another provider to the group. Since 0.2.2 that hint is preceded by the
+add another provider to the group. Since 0.2.3 that hint is preceded by the
 address of [REFUSED.md](REFUSED.md), which says what the check reads, how a
 line is reworded to pass it, and how to turn such a line off in an agent that
 has a switch for it — so the error carries its own fix, for the person who

@@ -126,6 +126,50 @@ test("a refused opening FLAGGED doesn't know is said with a comma, not moved", a
   )
 })
 
+// yetone, plugins#513: a comma that passed wasn't remembered, so every chat of
+// that agent, and every step of its tool loop, was refused first — an extra
+// round trip each and a pattern of channel refusals on the account. His probe,
+// one system prompt and three chats: main 4 sends and 1 refusal, this PR 6 and
+// 3. After the fix the second chat (and every step after it) goes with the
+// comma already in: 2 chats, 3 sends.
+test("a system prompt whose comma passed goes with it in before the first send", async () => {
+  // the vendor's check as measured: the opening line whole, without the comma
+  const OPEN = /^You are (?:an?|the) [^\n]*?\b(?:agent|assistant) (?:powered by|running on|running in|built on|based on)\b/
+  const uncommaed = (b) =>
+    b.messages.some((m) => (m.role === "system" || m.role === "assistant") && OPEN.test(text(m.content)))
+  // a system prompt of its own: what passed is remembered for as long as the
+  // plugin is loaded, as a moved one is, so a file's tests would share it
+  const system = { role: "system", content: "You are an AI agent powered by Probe Harness. (#513)" }
+  // a user message quoting a line, and a tool result holding one: neither is
+  // WorkBuddy's to read, and neither comes back altered
+  const quoted = { role: "user", content: "Quote exactly: You are an assistant built on Rails." }
+  const call = { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "read", arguments: '{"path":"calc.py"}' } }] }
+  const result = { role: "tool", tool_call_id: "c1", content: "You are a coding agent powered by Example Harness." }
+  await withService(
+    WorkBuddyAIAuthPlugin,
+    async (post, sent) => {
+      const first = await post({ messages: [system, ask] })
+      expect(first.status).toBe(200)
+      expect(sent.length).toBe(2) // refused as written, then taken with the comma
+      const second = await post({ messages: [system, quoted, call, result] })
+      expect(second.status).toBe(200)
+      // the comma was set before the first send: one send, and the two
+      // messages WorkBuddy doesn't read are as they were sent
+      expect(sent.length).toBe(3)
+      expect(sent[2].messages[0].content).toBe("You are an AI agent, powered by Probe Harness. (#513)")
+      expect(sent[2].messages[1]).toEqual(quoted)
+      expect(sent[2].messages[3]).toEqual(result)
+      // another agent's system prompt isn't given a comma it hasn't earned
+      const other = await post({ messages: [{ role: "system", content: "You are a coding agent powered by Another Harness. (#513)" }, ask] })
+      expect(other.status).toBe(200)
+      expect(sent.length).toBe(5)
+      expect(sent[3].messages[0].content).toBe("You are a coding agent powered by Another Harness. (#513)")
+      expect(sent[4].messages[0].content).toBe("You are a coding agent, powered by Another Harness. (#513)")
+    },
+    (b) => (uncommaed(b) ? new Response(REFUSAL, { status: 400, headers: { "content-type": "application/json; charset=utf-8" } }) : undefined),
+  )
+})
+
 test("a refusal that stands after the move is the user's, with the hint, tried once", async () => {
   const system = systemOf()
   await withService(WorkBuddyAuthPlugin, async (post, sent) => {
