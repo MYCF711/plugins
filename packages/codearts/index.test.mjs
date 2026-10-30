@@ -3350,7 +3350,7 @@ function storeClient() {
 }
 
 /** Fake STS: the authorization code yields S1, and every refresh token is spendable once. */
-function oneShotSts(urn = "iam::d1:user:hwRestart") {
+function oneShotSts(urn = "iam::d1:user:hwRestart", tag = "") {
   const spent = new Set()
   const calls = []
   let n = 0
@@ -3358,7 +3358,7 @@ function oneShotSts(urn = "iam::d1:user:hwRestart") {
     if (String(url) === x.STS_TOKEN_ENDPOINT) {
       const form = new URLSearchParams(String(init.body ?? ""))
       if (form.get("grant_type") !== "refresh_token") {
-        return new Response(stsBody("AK-SIGNIN", oaRefreshToken({ principal_urn: urn, jti: "S1" })), { status: 200 })
+        return new Response(stsBody("AK-SIGNIN", oaRefreshToken({ principal_urn: urn, jti: `S1${tag}` })), { status: 200 })
       }
       const token = form.get("refresh_token")
       calls.push(token)
@@ -3367,7 +3367,7 @@ function oneShotSts(urn = "iam::d1:user:hwRestart") {
       }
       spent.add(token)
       n += 1
-      return new Response(stsBody(`AK-${n}`, oaRefreshToken({ principal_urn: urn, jti: `S${n + 1}` })), { status: 200 })
+      return new Response(stsBody(`AK-${n}${tag}`, oaRefreshToken({ principal_urn: urn, jti: `S${n + 1}${tag}` })), { status: 200 })
     }
     if (String(url).includes("iam.cn-north-4")) {
       return new Response(JSON.stringify({ user: { phone: "0086-18970098051" } }), { status: 200 })
@@ -3422,6 +3422,12 @@ test("after a restart the other record still gets the renewed credential", async
   oa.renewalGates.clear()
   oa.refreshLineages.clear()
 
+  // magpie lists the officeace provider with its account before the renewal:
+  // that listing is what proves the record is still there (the push is not
+  // allowed to trust a remembered key alone).
+  const of = await OfficeAceAuthPlugin({ client }, { fetch: fetcher, ledgerPath, recordsPath })
+  await of.provider.models({ models: {} }, { auth: store.get(officeaceKey) })
+
   const ca2 = await CodeArtsAuthPlugin({ client }, { fetch: fetcher, ledgerPath, recordsPath })
   const renewed = await ca2.auth.refresh(store.get(codeartsKey))
   assert.equal(accessOf(renewed), "AK-1")
@@ -3430,7 +3436,6 @@ test("after a restart the other record still gets the renewed credential", async
 
   // ... and the OfficeAce record now renews on the token it was handed,
   // not on the spent S1 (which would answer STS5.1806 and sign it out).
-  const of = await OfficeAceAuthPlugin({ client }, { fetch: fetcher, ledgerPath, recordsPath })
   const again = await of.auth.refresh(store.get(officeaceKey))
   assert.equal(accessOf(again), "AK-2")
   assert.equal(calls.length, 2, "each renewal spent its own token, once")
@@ -3586,4 +3591,82 @@ test("the OfficeAce card's renewal error says OfficeAce, not CodeArts", async ()
   assert.ok(err, "a spent token must fail the renewal")
   assert.match(err.message, /^OfficeAce token request failed: 400/)
   assert.doesNotMatch(err.message, /CodeArts token request failed/)
+})
+
+/** Sign in once through the CodeArts card with its own fake STS. */
+async function signInCodeArts(client, opts) {
+  const ca = await CodeArtsAuthPlugin({ client }, opts)
+  const a = await ca.auth.methods[0].authorize()
+  const done = a.callback()
+  const port = new URL(a.url).searchParams.get("port")
+  await fetch(`http://127.0.0.1:${port}${x.REDIRECT_PATH}?code=C1`, { redirect: "manual" })
+  assert.equal((await done).type, "success")
+}
+
+test("two accounts: removing one OfficeAce record does not bring it back when the other is listed", async () => {
+  for (const restart of [false, true]) {
+    oa.seenProviderAccounts.clear()
+    oa.sharedAccountKeys.clear()
+    oa.renewalGates.clear()
+    oa.refreshLineages.clear()
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codearts-two-"))
+    const recordsPath = path.join(dir, "codearts-records.json")
+    const ledgerPath = path.join(dir, "checkins.json")
+    const { client, store } = storeClient()
+    const urnA = "iam::d1:user:hwA"
+    const urnB = "iam::d1:user:hwB"
+    const a = oneShotSts(urnA, "A")
+    const b = oneShotSts(urnB, "B")
+    await signInCodeArts(client, { fetch: a.fetcher, ledgerPath, recordsPath })
+    await signInCodeArts(client, { fetch: b.fetcher, ledgerPath, recordsPath })
+    const keyOf = (provider, urn) => `${provider}#${oa.accountKeySuffix(urn)}`
+    assert.ok(store.has(keyOf("officeace", urnA)) && store.has(keyOf("codearts", urnA)))
+    assert.ok(store.has(keyOf("officeace", urnB)) && store.has(keyOf("codearts", urnB)))
+
+    // the user removes A's OfficeAce record; B stays
+    store.delete(keyOf("officeace", urnA))
+    if (restart) {
+      oa.seenProviderAccounts.clear()
+      oa.sharedAccountKeys.clear()
+      oa.renewalGates.clear()
+      oa.refreshLineages.clear()
+    }
+
+    // the officeace provider is listed with B's account: A is not in it
+    const of = await OfficeAceAuthPlugin({ client }, { fetch: b.fetcher, ledgerPath, recordsPath })
+    await of.provider.models({ models: {} }, { auth: store.get(keyOf("officeace", urnB)) })
+
+    // A's CodeArts record renews — the removed OfficeAce record must stay gone
+    const ca2 = await CodeArtsAuthPlugin({ client }, { fetch: a.fetcher, ledgerPath, recordsPath })
+    await ca2.auth.refresh(store.get(keyOf("codearts", urnA)))
+    assert.equal(store.has(keyOf("officeace", urnA)), false, `officeace A must stay removed (restart=${restart})`)
+  }
+})
+
+test("a removed OfficeAce record is not written back when the first renewal comes before any listing", async () => {
+  oa.seenProviderAccounts.clear()
+  oa.sharedAccountKeys.clear()
+  oa.renewalGates.clear()
+  oa.refreshLineages.clear()
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codearts-nolist-"))
+  const recordsPath = path.join(dir, "codearts-records.json")
+  const ledgerPath = path.join(dir, "checkins.json")
+  const { client, store } = storeClient()
+  const urn = "iam::d1:user:hwNoList"
+  const { fetcher } = oneShotSts(urn)
+  await signInCodeArts(client, { fetch: fetcher, ledgerPath, recordsPath })
+  const codeartsKey = `codearts#${oa.accountKeySuffix(urn)}`
+  const officeaceKey = `officeace#${oa.accountKeySuffix(urn)}`
+  assert.ok(store.has(codeartsKey) && store.has(officeaceKey))
+  store.delete(officeaceKey)
+
+  // magpie restarts; a usage refresh and then a renewal come before any catalog listing
+  oa.seenProviderAccounts.clear()
+  oa.sharedAccountKeys.clear()
+  oa.renewalGates.clear()
+  oa.refreshLineages.clear()
+  const ca2 = await CodeArtsAuthPlugin({ client }, { fetch: fetcher, ledgerPath, recordsPath })
+  await ca2.auth.usage(async () => store.get(codeartsKey), {})
+  await ca2.auth.refresh(store.get(codeartsKey))
+  assert.equal(store.has(officeaceKey), false, "no listing yet: nothing may be written back")
 })

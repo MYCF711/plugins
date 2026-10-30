@@ -151,10 +151,13 @@ An `officeace-auth` record beside a CodeArts record holds a different token (iss
 `pdp5_for_agentarts` against `codearts-agent`), so it is another chain: it spends its own token,
 keeps its own MaaS pair, and a renewal that fails fails — it is never handed the other record's
 credential. The first record's renewal still *pushes* the new credential to the other one at the
-key this package wrote for it. Those keys are kept in a small file
-(`~/.config/magpie/codearts-records.json`, `MAGPIE_CODEARTS_RECORDS`), because magpie restarts on
-every update and an in-memory map would be empty by the time the first renewal after the restart
-spends the shared token.
+key this package wrote for it — but **only when the target provider's own listing has shown that
+account in this process**; a remembered key is a hint for where to write, never proof the account
+still exists. Those keys are kept in a small file (`~/.config/magpie/codearts-records.json`,
+`MAGPIE_CODEARTS_RECORDS`), because magpie restarts on every update and an in-memory map would be
+empty by the time the first renewal after the restart spends the shared token. A removed record is
+therefore never written back: before the first listing nothing is pushed, and after it the account
+is simply not there.
 
 **Models.** OfficeAce's catalog (`GET {maas}/v2/models`) is a registry, not a promise: 26 entries,
 most of which answer `404 ModelArts.81009 Invalid model` at chat. The plugin cuts it down to the
@@ -186,9 +189,11 @@ under **Settings → Usage → Plugins**.
   spent by *another* process before its push reached it fails its renewal and asks for the
   sign-in again rather than taking another record's credential. Two separate magpie processes
   renewing at the very same moment can still race; the loser asks again and is signed out only
-  if the token stays spent. A removed account stays removed: a provider listed with no accounts
-  forgets the keys this package wrote for it, so the other record's next renewal cannot write
-  the removed one back.
+  if the token stays spent. A removed account stays removed: a renewal pushes only to a record
+  the target provider's own listing has shown in this process — a remembered key alone is never
+  enough — and a provider listed with no accounts forgets the keys it wrote. Nothing is pushed
+  before that first listing: the other record then renews on its own, or asks for the sign-in
+  again if its token was spent.
 - `officeace-auth` and this package cannot both serve the `officeace` provider id. Magpie asks
   which plugin serves it; remove the old one.
 

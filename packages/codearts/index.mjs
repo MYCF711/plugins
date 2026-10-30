@@ -3730,7 +3730,9 @@ function noteProviderAccount(provider, identity) {
 
 /** The provider was listed with no account at all: it has none, as far as this process knows. */
 function noteProviderEmpty(provider, recordsPath = "") {
-  if (!seenProviderAccounts.has(provider)) seenProviderAccounts.set(provider, new Set())
+  // No accounts: any identity this process saw before is gone from the provider
+  // now, so the set is emptied (a stale identity must not authorise a push).
+  seenProviderAccounts.set(provider, new Set())
   // A provider with no accounts has none this package wrote either: forget the
   // keys, or the next renewal of the other record would write a removed
   // account back (the host's auth.set creates a record that isn't there).
@@ -3803,7 +3805,6 @@ async function writeSharedRecord(client, target, cred, fetcher = fetch, recordsP
   }
   sharedAccountKeys.set(`${target}\n${identity}`, key)
   rememberRecordKey(recordsPath, target, identity, key)
-  noteProviderAccount(target, identity)
   return { key, body }
 }
 
@@ -3811,6 +3812,13 @@ async function writeSharedRecord(client, target, cred, fetcher = fetch, recordsP
 async function pushSharedRecord(client, target, cred, fetcher = fetch, recordsPath = "") {
   const identity = accountIdentityOf(cred).id
   if (!identity || !client?.auth?.set) return
+  // Only a record the target provider's own listing has shown this process
+  // holds is known to still exist. A remembered key is a hint for where to
+  // write, never proof that the account is still there — a key that outlives
+  // the account writes it back on the next renewal. Nothing is pushed before
+  // the first listing; that record then renews on its own, or asks to sign in
+  // if its token was spent.
+  if (!seenProviderAccounts.get(target)?.has(identity)) return
   const key = recordKeyOf(recordsPath, target, identity)
   if (!key) return
   const body = target === OFFICEACE_PROVIDER
