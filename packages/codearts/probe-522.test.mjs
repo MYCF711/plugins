@@ -6,6 +6,9 @@ import os from "node:os"
 import path from "node:path"
 import { CodeArtsAuthPlugin, OfficeAceAuthPlugin, _internal as x, _officeace as oa } from "./index.mjs"
 
+// Never write the real ~/.config from a test (see index.test.mjs).
+process.env.MAGPIE_CODEARTS_RECORDS = path.join(os.tmpdir(), `codearts-records-probe-${process.pid}.json`)
+
 const b64u = (o) => Buffer.from(JSON.stringify(o)).toString("base64url")
 const URN = "iam::d1:user:hwprobe"
 const rt = (jti) => `h.${b64u({ jti, user_profile: JSON.stringify({ principal_urn: URN, principal_id: "pid", account_id: "01a1642ad2ae7f93bf6387ad2fc5f09e" }) })}.s`

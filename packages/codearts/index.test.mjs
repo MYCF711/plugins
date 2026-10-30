@@ -14,6 +14,10 @@ import path from "node:path"
 
 import { CodeArtsAuthPlugin, OfficeAceAuthPlugin, _internal as x, _officeace as oa } from "./index.mjs"
 
+// The record-key file lives beside the check-in ledger; a test must never write
+// the real ~/.config (a fresh CI home hides this, a developer's does not).
+process.env.MAGPIE_CODEARTS_RECORDS = path.join(os.tmpdir(), `codearts-records-test-${process.pid}.json`)
+
 // Never the real ledger in ~/.config/magpie: every plugin made here keeps its
 // check-ins in a scratch file of its own.
 const ledgerDir = fs.mkdtempSync(path.join(os.tmpdir(), "codearts-ledger-"))
@@ -3317,4 +3321,119 @@ test("a renewal hands the other record of the account the new credential", async
   assert.equal(written.access, "AK5")
   // a rotated credential keeps the MaaS pair the record already had
   assert.equal(written.modelAppKey, "app-key")
+})
+
+// ---- one sign-in, two records, one process restart -------------------------
+//
+// A sign-in writes both records from one credential, so both hold refresh token
+// S1. The first renewal spends S1 and must hand the new credential to the other
+// record — after a magpie restart too, when every in-memory map is empty and
+// the key this package wrote for that record is only in the small records file.
+
+/** A magpie-like client that keeps the records it is handed, by key. */
+function storeClient() {
+  const store = new Map()
+  return {
+    store,
+    client: {
+      app: { log: async () => {} },
+      auth: {
+        set: async ({ path: p, body }) => {
+          store.set(p.id, body)
+          return { data: true }
+        },
+        remove: async ({ path: p }) => {
+          store.delete(p.id)
+        },
+      },
+    },
+  }
+}
+
+/** Fake STS: the authorization code yields S1, and every refresh token is spendable once. */
+function oneShotSts(urn = "iam::d1:user:hwRestart") {
+  const spent = new Set()
+  const calls = []
+  let n = 0
+  const fetcher = async (url, init = {}) => {
+    if (String(url) === x.STS_TOKEN_ENDPOINT) {
+      const form = new URLSearchParams(String(init.body ?? ""))
+      if (form.get("grant_type") !== "refresh_token") {
+        return new Response(stsBody("AK-SIGNIN", oaRefreshToken({ principal_urn: urn, jti: "S1" })), { status: 200 })
+      }
+      const token = form.get("refresh_token")
+      calls.push(token)
+      if (spent.has(token)) {
+        return new Response(JSON.stringify({ error_code: "STS5.1806", error_msg: "refresh token has been used" }), { status: 400 })
+      }
+      spent.add(token)
+      n += 1
+      return new Response(stsBody(`AK-${n}`, oaRefreshToken({ principal_urn: urn, jti: `S${n + 1}` })), { status: 200 })
+    }
+    if (String(url).includes("iam.cn-north-4")) {
+      return new Response(JSON.stringify({ user: { phone: "0086-18970098051" } }), { status: 200 })
+    }
+    if (String(url).includes("/v1/claw/client-permission-validate")) return oaMaasAnswer()
+    return new Response("{}", { status: 200 })
+  }
+  return { fetcher, calls }
+}
+
+test("after a restart the other record still gets the renewed credential", async () => {
+  oa.seenProviderAccounts.clear()
+  oa.sharedAccountKeys.clear()
+  oa.renewalGates.clear()
+  oa.refreshLineages.clear()
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codearts-restart-"))
+  const recordsPath = path.join(dir, "codearts-records.json")
+  const ledgerPath = path.join(dir, "checkins.json")
+  const { client, store } = storeClient()
+  const { fetcher, calls } = oneShotSts()
+
+  // One sign-in writes both records, from the one credential it yielded.
+  const ca = await CodeArtsAuthPlugin({ client }, { fetch: fetcher, ledgerPath, recordsPath })
+  const a = await ca.auth.methods[0].authorize()
+  const done = a.callback()
+  const port = new URL(a.url).searchParams.get("port")
+  await fetch(`http://127.0.0.1:${port}${x.REDIRECT_PATH}?code=C1`, { redirect: "manual" })
+  assert.equal((await done).type, "success")
+  const codeartsKey = [...store.keys()].find((k) => k.startsWith("codearts"))
+  const officeaceKey = [...store.keys()].find((k) => k.startsWith("officeace"))
+  // the two records carry their credential in their own shape: snake_case for
+  // CodeArts, the officeace-auth shape (`access`, `refreshToken`) for OfficeAce
+  const tokenOf = (body) => {
+    const a = JSON.parse(body.access)
+    return a.refresh_token ?? a.refreshToken
+  }
+  const accessOf = (body) => {
+    const a = JSON.parse(body.access)
+    return a.access_key_id ?? a.access
+  }
+  assert.ok(codeartsKey, "the CodeArts record was written")
+  assert.ok(officeaceKey, "the OfficeAce record was written")
+  assert.equal(tokenOf(store.get(codeartsKey)), tokenOf(store.get(officeaceKey)), "both hold one token")
+  // the keys this package wrote are on disk, for after the restart
+  const onDisk = JSON.parse(fs.readFileSync(recordsPath, "utf8"))
+  assert.equal(onDisk[`officeace\n${"iam::d1:user:hwRestart"}`]?.key, officeaceKey)
+  assert.equal(onDisk[`codearts\n${"iam::d1:user:hwRestart"}`]?.key, codeartsKey)
+
+  // magpie restarts: every module map is empty; only the file is left.
+  oa.seenProviderAccounts.clear()
+  oa.sharedAccountKeys.clear()
+  oa.renewalGates.clear()
+  oa.refreshLineages.clear()
+
+  const ca2 = await CodeArtsAuthPlugin({ client }, { fetch: fetcher, ledgerPath, recordsPath })
+  const renewed = await ca2.auth.refresh(store.get(codeartsKey))
+  assert.equal(accessOf(renewed), "AK-1")
+  // the push found the OfficeAce record by the key remembered on disk
+  assert.equal(accessOf(store.get(officeaceKey)), "AK-1")
+
+  // ... and the OfficeAce record now renews on the token it was handed,
+  // not on the spent S1 (which would answer STS5.1806 and sign it out).
+  const of = await OfficeAceAuthPlugin({ client }, { fetch: fetcher, ledgerPath, recordsPath })
+  const again = await of.auth.refresh(store.get(officeaceKey))
+  assert.equal(accessOf(again), "AK-2")
+  assert.equal(calls.length, 2, "each renewal spent its own token, once")
+  assert.equal(new Set(calls).size, 2)
 })

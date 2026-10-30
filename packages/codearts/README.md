@@ -150,8 +150,11 @@ many hooks ask.
 An `officeace-auth` record beside a CodeArts record holds a different token (issuer
 `pdp5_for_agentarts` against `codearts-agent`), so it is another chain: it spends its own token,
 keeps its own MaaS pair, and a renewal that fails fails — it is never handed the other record's
-credential. The first record's renewal still *pushes* the new credential to the other one when
-that record's key is one this package wrote, which is how the two stay in step.
+credential. The first record's renewal still *pushes* the new credential to the other one at the
+key this package wrote for it. Those keys are kept in a small file
+(`~/.config/magpie/codearts-records.json`, `MAGPIE_CODEARTS_RECORDS`), because magpie restarts on
+every update and an in-memory map would be empty by the time the first renewal after the restart
+spends the shared token.
 
 **Models.** OfficeAce's catalog (`GET {maas}/v2/models`) is a registry, not a promise: 26 entries,
 most of which answer `404 ModelArts.81009 Invalid model` at chat. The plugin cuts it down to the
@@ -177,12 +180,14 @@ under **Settings → Usage → Plugins**.
 
 **Known limits.**
 
-- STS spends a refresh token once. Records that share one token (written from one sign-in) are
-  renewed once per process: the second caller waits for the first. A record whose token was
-  already spent elsewhere — the other magpie process renewed it and its push did not reach this
-  one — fails its renewal and asks for the sign-in again rather than taking another record's
-  credential. Two *separate magpie processes* renewing at the very same moment can still race;
-  the loser then asks again and signs the account out only if the token stays spent.
+- STS spends a refresh token once, and the two records of one sign-in share one token. The first
+  renewal spends it and pushes the new credential to the other record — across a magpie restart
+  too, because the key this package wrote for that record is on disk. A record whose token was
+  spent by *another* process before its push reached it fails its renewal and asks for the
+  sign-in again rather than taking another record's credential. Two separate magpie processes
+  renewing at the very same moment can still race; the loser asks again and is signed out only
+  if the token stays spent. Deleting one of the two records is not recommended: the other one's
+  next renewal writes its sibling back at the remembered key (delete both to remove the account).
 - `officeace-auth` and this package cannot both serve the `officeace` provider id. Magpie asks
   which plugin serves it; remove the old one.
 
@@ -195,6 +200,7 @@ under **Settings → Usage → Plugins**.
 | `retryDelays` | `[2000,4000,6000,8000,10000]` | retry waits in ms (the last repeats) |
 | `queueBudgetMs` | `300000` | how long to wait in the gateway's queue |
 | `thinking` | `true` | `false` stops adding `thinking: { type: "enabled" }` |
+| `recordsPath` | `~/.config/magpie/codearts-records.json` | where the keys of the sibling records this package wrote are kept (`MAGPIE_CODEARTS_RECORDS` overrides the default) |
 
 ## Credits
 
@@ -267,10 +273,11 @@ OfficeAce 在 0.3.0 之前是独立的 `officeace-auth` 包：那些账号按 ma
 - **OfficeAce 的用量与签到**：`/v1/subscription` 的套餐桶（`skus[].quotas`）与活动桶（`bonus_skus`）转成 magpie 的窗口；
   `.trial` 桶没有到期时间就不显示；已过期的桶收进折叠区（`aside`）且不参与路由。签到是每个北京自然日一次
   `POST /v1/subscription/bonus/claim`：2xx 但 `bonus_skus` 为空是「今日已无新增可领」（`done`），不是失败。
-- **已知限制**：STS 的 refresh_token 只能用一次。持有同一个 token 的记录（同一次登录写出的两条）在一个 magpie 进程内
-  只续期一次，后来者等先到者的结果；token 已在别处被花掉的记录（另一个 magpie 进程续期了、推送却没到）续期会失败并
-  要求重新登录，而不是拿走另一条记录的凭据。**两个 magpie 进程同时续期**仍可能撞车，输的一方会重试，只有当 token
-  一直是被消费状态时才标记需要重新登录。
+- **已知限制**：STS 的 refresh_token 只能用一次，同一次登录写出的两条记录共用同一个 token。先续期的一方花掉它，并把新凭据
+  推给另一条记录——**magpie 重启后也一样**，因为本包给那条记录写的 key 存在磁盘上（`~/.config/magpie/codearts-records.json`，
+  可用 `MAGPIE_CODEARTS_RECORDS` 改）。若 token 已被**另一个进程**花掉、推送没赶上，那条记录续期会失败并要求重新登录，
+  而不是拿走别的链的凭据。两个 magpie 进程同时续期仍可能撞车，输的一方重试，只有 token 一直是被消费状态才标记需重新登录。
+  **不建议只删两条记录中的一条**：另一条下次续期会按记住的 key 把它写回来（要删请两条一起删）。
   另外，`officeace-auth` 与本包不能同时服务 `officeace` 这个 provider id，magpie 会让你选一个，装之前先卸掉旧的。
 - **致谢**：原作者 [yuweihao17](https://github.com/yuweihao17/codearts)；HuHong-Tao、ReachForStar 的
   实测与实现；[Ebony-Vinyl/dsh-our-free-model](https://github.com/Ebony-Vinyl/dsh-our-free-model)。
