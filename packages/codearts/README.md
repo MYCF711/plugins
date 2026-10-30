@@ -143,22 +143,20 @@ id — the IAM domain id, as the record `officeace-auth` wrote carried — and n
 phone: magpie hangs a user's own name for the account, its proxy and a gateway key off
 `accountId`, so the phone belongs only in `usage().user` (#483, magpie#4416). A renewal never
 renames an account: the stored `accountId` and `uid` stand exactly as written — the domain id, or
-the phone `officeace-auth` 0.1.14 stored — and a value computed from the credential is only
-filled in when the record has none. A new sign-in names its account by the domain id.
+the phone `officeace-auth` 0.1.14 and later stored — and a value computed from the credential is
+only filled in when the record has none. A new sign-in names its account by the domain id.
 
 **A record is renewed only with its own refresh token.** The unit of coordination is the refresh
 chain: the OAuth client a token was issued to plus the token's lineage (a rotation keeps its
-parent's, so a record still holding the spent token is known to be on the same chain). Two records
-written from one sign-in hold the same token and are one chain — that token is spent once however
-many hooks ask.
-An `officeace-auth` record beside a CodeArts record holds a different token (issuer
-`pdp5_for_agentarts` against `codearts-agent`), so it is another chain: it spends its own token,
-keeps its own MaaS pair, and a renewal that fails fails — it is never handed the other record's
-credential. Neither record's renewal writes the other: the two only share the sign-in that created
-them, never a credential afterwards. The first of the two to renew spends the shared token; the
-other one's next renewal is refused (`STS5.1806`) and asks for the sign-in again. That is
-deliberate — writing the new credential into the other record is exactly what used to bring a
-removed account back — and it is the price stated under *Known limits*.
+parent's, so a record still holding the spent token is known to be on the same chain). Each card's
+record holds its own refresh token, from its own sign-in, so it is a chain of its own and spends
+its own token however many hooks ask.
+An `officeace-auth` record beside a CodeArts record holds a token from another issuer
+(`pdp5_for_agentarts` against `codearts-agent`), so it is another chain: it spends its own token,
+keeps its own MaaS pair, and a renewal that fails fails — it is never handed another record's
+credential. No record's renewal writes another one: a renewal writes only the record it was asked
+to renew. That is deliberate — writing the new credential into the other record is exactly what
+used to bring a removed account back.
 
 **Models.** OfficeAce's catalog (`GET {maas}/v2/models`) is a registry, not a promise: 26 entries,
 most of which answer `404 ModelArts.81009 Invalid model` at chat. The plugin cuts it down to the
@@ -184,13 +182,13 @@ under **Settings → Usage → Plugins**.
 
 **Known limits.**
 
-- STS spends a refresh token once, and the two records of one sign-in share one token. Only the
-  first of them to renew gets a new one; **the other record's next renewal fails (`STS5.1806`)
-  and asks for the sign-in again**. That is the price of never writing one record from another —
-  and the reason a record the user removed can never come back: a renewal writes no other
-  record, whether it was listed, used, or not seen at all. Two separate magpie processes renewing
-  the same account at the same moment still race; the loser asks again and is signed out only if
-  the token stays spent.
+- STS spends a refresh token once. Each card of this package signs in on its own and holds its own
+  record and its own refresh token, so the two cards never affect each other. **A renewal writes
+  only the record being renewed**, which is also why a record the user removed can never come
+  back: no other record is written, whether it was listed, used, or not seen at all, and across a
+  restart too. An old `officeace-auth` record likewise renews only along its own chain. Two
+  separate magpie processes renewing the same account at the same moment still race; the loser
+  asks again and is signed out only if the token stays spent.
 - `officeace-auth` and this package cannot both serve the `officeace` provider id. Magpie asks
   which plugin serves it; remove the old one.
 
@@ -214,7 +212,7 @@ measurements and code of [HuHong-Tao](https://github.com/yuweihao17/codearts/pul
 
 ## 中文
 
-一次**华为云 OAuth 登录**，在 OpenCode 和 magpie 里同时服务两个供应商：
+用**华为云 OAuth 登录**，在 OpenCode 和 magpie 里提供两个供应商：
 
 - **华为云码道（CodeArts Agent）**的编码套餐（体验版、个人与企业积分套餐），模型为 GLM、DeepSeek、
   openPangu 等。provider id：`codearts`。

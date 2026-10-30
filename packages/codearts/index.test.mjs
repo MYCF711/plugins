@@ -2543,10 +2543,10 @@ test("a sign-in names the account by its URN while the card shows the phone (rev
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
-// OfficeAce — the package's second provider, served from the same Huawei Cloud
-// sign-in. These tests are about the two records of one account: the one
-// `officeace-auth` already wrote, the one a sign-in writes for both providers,
-// and the renewal that must not spend one refresh token twice.
+// OfficeAce — the package's second provider, signed in on its own card. These
+// tests are about the two records one account can have: the one `officeace-auth`
+// already wrote, the one this package's own sign-in writes, and the renewal
+// that must not spend a refresh token twice.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const oaB64u = (o) => Buffer.from(JSON.stringify(o)).toString("base64url")
@@ -2677,7 +2677,7 @@ const oaMaasAnswer = (key = "app-key", secret = "app-secret") =>
 
 test("an account signed in through officeace-auth is read as it is, no second sign-in", async () => {
   const { record } = await officeAceAuthRecord()
-  // The record is read back as the one credential both providers use.
+  // The record is read back as a credential this card can use.
   const cred = oa.officeAceCredentialOf(record)
   assert.equal(cred.access_key_id, "HSTAOZ3JN3WWYF3L")
   assert.equal(cred.secret_access_key, "9hefA4eK2KTT")
@@ -2976,7 +2976,7 @@ test("signed in without MaaS, chat says which step is missing instead of sending
   assert.equal(seen.some((c) => c.url.includes("/v2/chat/completions")), false)
 })
 
-// ---- one sign-in, two records --------------------------------------------
+// ---- a sign-in writes only its own card's record ---------------------------
 
 /** The credential a CodeArts sign-in yields (as magpie stores it). */
 async function codeArtsSignInCredential(overrides = {}) {
@@ -3070,7 +3070,7 @@ test("recordKeyFor never picks a key another account already sits at", async () 
   assert.match(oa.recordKeyFor("officeace", "iam::d1:user:someone-else"), /^officeace#[0-9a-f]{8}$/)
 
   const calls = []
-  const written = await oa.writeSharedRecord(oaClient(calls), "officeace", cred)
+  const written = await oa.writeProviderRecord(oaClient(calls), "officeace", cred)
   assert.equal(written, null)
   assert.equal(calls.length, 0)
 })
@@ -3297,12 +3297,12 @@ test("a renewal never writes the other record of the account", async () => {
   assert.equal(calls.some((c) => c.path?.id?.startsWith("officeace")), false, "a renewal must not write the other record")
 })
 
-// ---- one sign-in, two records, one process restart -------------------------
+// ---- two cards, two records, one process restart ---------------------------
 //
-// A sign-in writes both records from one credential, so both hold refresh token
-// S1. The first renewal spends S1 and must hand the new credential to the other
-// record — after a magpie restart too, when every in-memory map is empty and
-// the key this package wrote for that record is only in the small records file.
+// Each card signs in on its own and holds its own refresh token, so the two
+// records are separate chains. After a magpie restart — when every in-memory map
+// is empty and the key this package wrote for a record is only in the small
+// records file — renewing one record must leave the other card's record alone.
 
 /** A magpie-like client that keeps the records it is handed, by key. */
 function storeClient() {

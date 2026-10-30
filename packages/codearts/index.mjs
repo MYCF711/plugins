@@ -2767,7 +2767,7 @@ export const CodeArtsAuthPlugin = async ({ client } = {}, options = {}) => {
             const flow = await startOAuthFlow(fetcher)
             return {
               url: flow.loginUrl,
-              instructions: "Sign in to Huawei Cloud in the browser; this window closes itself when done.",
+              instructions: "Sign in to Huawei Cloud in the browser. This signs in CodeArts only — the OfficeAce card has its own sign-in. This window closes itself when done.",
               method: "auto",
               async callback() {
                 try {
@@ -2799,7 +2799,7 @@ export const CodeArtsAuthPlugin = async ({ client } = {}, options = {}) => {
                   // refresh token is spent once, so two records holding one
                   // token would sign each other out; the other card has its own
                   // sign-in and its own token.
-                  await writeSharedRecord(client, PROVIDER, withMaas, fetcher)
+                  await writeProviderRecord(client, PROVIDER, withMaas, fetcher)
                   return record
                 } catch (e) {
                   return { type: "failed", error: e?.message ?? String(e) }
@@ -2893,21 +2893,19 @@ export const _internal = {
 //   * an OfficeAce STS triple signs CodeArts' `snap-access` reads byte for byte
 //     the same way the CodeArts triple does.
 //
-// So one sign-in is one credential, and both providers are served from it. The
-// second provider keeps its record in the shape `officeace-auth` (the package
-// this one absorbs) has always written — `access` is a JSON string carrying
-// `modelAppKey` / `securityToken` / `dpopPrivateJwk` … — so the accounts signed
-// in through that package keep working without signing in again. The account
-// is stored under the same provider id it always had (`officeace`), so its
-// records are exactly where magpie already keeps them.
+// So one credential signs both providers' APIs, but each card signs in on its
+// own and keeps its own record: a Huawei Cloud refresh token is spent once, so
+// one token written into two records would sign one of them out at the other's
+// renewal (`STS5.1806`). The second provider keeps its record in the shape
+// `officeace-auth` (the package this one absorbs) has always written — `access`
+// is a JSON string carrying `modelAppKey` / `securityToken` / `dpopPrivateJwk`
+// … — so the accounts signed in through that package keep working without
+// signing in again. The account is stored under the same provider id it always
+// had (`officeace`), so its records are exactly where magpie already keeps them.
 //
-// The two records of one account *do* share one rotating refresh token — a
-// sign-in writes both from one credential, and STS spends a refresh token
-// once. A renewal writes only the record being renewed; the other record's
-// next renewal is refused and asks for the sign-in again. Nothing is ever
-// written into another record, which is what kept resurrecting an account the
-// user had removed. A failed renewal never borrows a credential from another
-// chain.
+// A renewal writes only the record being renewed. Nothing is ever written into
+// another record, which is what kept resurrecting an account the user had
+// removed, and a failed renewal never borrows a credential from another chain.
 
 /** The OfficeAce provider id — the one the `officeace-auth` package used. */
 const OFFICEACE_PROVIDER = "officeace"
@@ -3703,11 +3701,11 @@ async function withOfficeAceMaas(cred, fetcher = fetch) {
 
 /**
  * Write one account's record under `target`, in that provider's own shape.
- * Used at a sign-in (so the second provider gets the account the user just
- * signed in with) and, for this provider's own record, so the key it lands at
- * is one a later renewal can find again.
+ * Used at a sign-in, so the card that signed in keeps its record where a later
+ * renewal can find it again. Only ever called for the card's own provider:
+ * writing one sign-in into two records is what `STS5.1806` was about.
  */
-async function writeSharedRecord(client, target, cred, fetcher = fetch) {
+async function writeProviderRecord(client, target, cred, fetcher = fetch) {
   const identity = accountIdentityOf(cred).id
   if (!identity || !client?.auth?.set) return null
   const key = recordKeyFor(target, identity)
@@ -3726,9 +3724,9 @@ async function writeSharedRecord(client, target, cred, fetcher = fetch) {
 /**
  * Renew one Huawei Cloud credential, once per refresh chain.
  *
- * Two records of one account that were written from one sign-in hold the same
- * refresh token: STS spends it once, so the second caller here gets the first's
- * answer. Two records on different chains (an `officeace-auth` record beside a
+ * One credential, renewed once: callers holding the same record (same chain, same
+ * token) share a single in-flight renewal, so STS is asked once and everyone gets
+ * that answer. Records on different chains (an `officeace-auth` record beside a
  * CodeArts one) never meet in here at all — each spends its own token, and a
  * renewal that fails is a failure, never another chain's credential.
  */
@@ -3747,9 +3745,9 @@ function renewSharedCredential(cred, run, client = refreshClientOf(cred)) {
         if (cred[k] && !next[k]) next[k] = cred[k]
       }
       // The new token belongs to the same chain: a record still holding the
-      // spent one is known to be on it (the gate above), and the push below
-      // hands it the credential. Nothing else is remembered, so a credential a
-      // hook merely saw can never stand in for a newer one.
+      // spent one is known to be on it (the gate above). Nothing else is
+      // remembered, so a credential a hook merely saw can never stand in for a
+      // newer one.
       linkRotation(cred, next)
       return next
     })
@@ -3843,8 +3841,9 @@ async function persistOfficeAceRecord(client, cred, prev) {
 }
 
 /**
- * OfficeAce — the second provider of this package, served from the same
- * Huawei Cloud sign-in as `codearts`.
+ * OfficeAce — the second provider of this package, signed in on its own card
+ * through Huawei Cloud OAuth like `codearts`, with a record and a refresh token
+ * of its own.
  *
  * Provider id `officeace`: the id `officeace-auth` used, so the accounts signed
  * in through that package are read from where magpie already keeps them
@@ -3882,9 +3881,8 @@ export const OfficeAceAuthPlugin = async ({ client } = {}, options = {}) => {
         let cred = credential(auth)
         if (!cred) {
           // No account of its own: nothing is adopted here. An OfficeAce record
-          // is only ever written by a sign-in (this card's, or the CodeArts
-          // card's beside it) — an account the user signed out of must not come
-          // back on the next listing.
+          // is only ever written by this card's own sign-in — an account the
+          // user signed out of must not come back on the next listing.
           noteProviderEmpty(OFFICEACE_PROVIDER)
           return provider.models
         }
@@ -3943,9 +3941,10 @@ export const OfficeAceAuthPlugin = async ({ client } = {}, options = {}) => {
           type: "oauth",
           label: "Sign in with Huawei Cloud",
           /**
-           * The same Huawei Cloud sign-in as the CodeArts card, because it is
-           * literally the same credential: the STS triple it yields signs both
-           * vendors' APIs (measured). One sign-in, both providers.
+           * A sign-in of this card's own, not the CodeArts card's: the STS
+           * triple it yields signs both vendors' APIs (measured), but a Huawei
+           * Cloud refresh token is spent once, so a second record holding this
+           * one would sign this card out at its renewal (`STS5.1806`).
            *
            * `authorize()` returns at once; the waiting happens in `callback()`.
            */
@@ -3968,7 +3967,7 @@ export const OfficeAceAuthPlugin = async ({ client } = {}, options = {}) => {
                   const withMaas = await withOfficeAceMaas(identified, fetcher)
                   // This sign-in writes this card's record only — the two cards
                   // never share a refresh token, which is spent once.
-                  await writeSharedRecord(client, OFFICEACE_PROVIDER, withMaas, fetcher)
+                  await writeProviderRecord(client, OFFICEACE_PROVIDER, withMaas, fetcher)
                   return { ...officeAceRecordBody(withMaas), type: "success" }
                 } catch (e) {
                   return { type: "failed", error: e?.message ?? String(e) }
@@ -3981,7 +3980,7 @@ export const OfficeAceAuthPlugin = async ({ client } = {}, options = {}) => {
         },
       ],
 
-      /** Renew this account's credential; the CodeArts record of it follows. */
+      /** Renew this account's credential — this card's record only. */
       async refresh(auth) {
         const cred = credential(auth)
         if (!cred) return undefined
@@ -4130,7 +4129,7 @@ export const _officeace = {
   fetchOfficeAceTokenRates, fetchOfficeAceCatalog, fetchOfficeAceMaasInfo, officeAceMaasInfo,
   signOfficeAceV11, oaSdkDate, officeAceSigned, basicAuthorization, isCodeArtsClient,
   renewOfficeAceCredential, renewSharedCredential, nearOfficeAceExpiry,
-  accountKeySuffix, recordKeyFor, writeSharedRecord,
+  accountKeySuffix, recordKeyFor, writeProviderRecord,
   refreshClientOf, refreshChainOf, refreshLineages, lineageOf, linkRotation, rememberLineage,
   noteProviderAccount, noteProviderEmpty, seenProviderAccounts,
   renewalGates, withOfficeAceMaas, persistOfficeAceRecord,
