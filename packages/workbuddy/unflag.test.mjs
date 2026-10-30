@@ -15,8 +15,20 @@ test("each flagged phrase is put in other words, whatever its case", () => {
   expect(unflagged(unflagged(codex))).toBe(unflagged(codex))
   expect(unflagged("x-anthropic-billing-header: cc_version=2.1.280.31f; cc_entrypoint=sdk-cli;\nhello")).toBe("hello")
   expect(unflagged("nothing to see")).toBe("nothing to see")
-  expect(unflagged("You are an AI agent powered by DeepSeek Harness. Be brief.")).toBe("You are an AI agent that helps the user with programming tasks. Be brief.")
-  expect(unflagged("YOU ARE AN AI AGENT POWERED BY DEEPSEEK HARNESS")).toBe("You are an AI agent that helps the user with programming tasks.")
+  expect(unflagged("You are an AI agent powered by DeepSeek Harness. Be brief.")).toBe("You are an AI agent, powered by DeepSeek Harness. Be brief.")
+  expect(unflagged("YOU ARE AN AI AGENT POWERED BY DEEPSEEK HARNESS")).toBe("You are an AI agent, powered by DeepSeek Harness.")
+})
+
+// The opener says which harness the agent runs in, and the rest of a DSH
+// prompt leans on that name. It is put in other words only as far as
+// WorkBuddy's whole-line match needs, so the name stays.
+test("DeepSeek Harness's opener keeps the harness's name", () => {
+  const opener = "You are an AI agent powered by DeepSeek Harness."
+  const spread = unflagged(opener)
+  expect(spread).toBe("You are an AI agent, powered by DeepSeek Harness.")
+  expect(spread).toContain("DeepSeek Harness")
+  expect(spread).not.toBe(opener)
+  expect(unflagged(spread)).toBe(spread)
 })
 
 test("Claude Code's request through magpie passes: header block gone, the rest rewritten", () => {

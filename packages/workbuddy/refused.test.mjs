@@ -4,12 +4,24 @@
 import { expect, test } from "bun:test"
 import { _internal } from "./index.mjs"
 
-const { explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT } = _internal
+const { explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, REFUSED_DOC } = _internal
 
 test("the refusal ends in the hint", async () => {
   const res = await explained(new Response(JSON.stringify({ error: { message: "Illegal API invocation from an unapproved channel", code: 11004 } }), { status: 403 }))
   expect(res.status).toBe(403)
-  expect((await res.json()).error.message).toBe("Illegal API invocation from an unapproved channel — " + REFUSED_HINT)
+  expect((await res.json()).error.message).toBe("Illegal API invocation from an unapproved channel — " + REFUSED_DOC + " — " + REFUSED_HINT)
+})
+
+// The hint stays the message's end, where magpie's Routing page matches it
+// (Routing client.js: HINTS.find((h) => error.endsWith(" — " + h))), so a
+// refusal points at where its fix is written down and still ends as it did.
+test("the refusal names where its fix is written, and still ends in the hint", async () => {
+  const res = await explained(new Response(JSON.stringify({ error: { message: "Illegal API invocation from an unapproved channel" } }), { status: 400 }))
+  const message = (await res.json()).error.message
+  expect(message.endsWith(" — " + REFUSED_HINT)).toBe(true)
+  expect(message).toContain(REFUSED_DOC)
+  expect(message.indexOf(REFUSED_DOC)).toBeLessThan(message.indexOf(REFUSED_HINT))
+  expect(REFUSED_DOC).toMatch(/^https:\/\/github\.com\/magpie-community\/plugins\/blob\/main\/packages\/workbuddy\/REFUSED\.md$/)
 })
 
 test("the hint is magpie's word for word, and blames no one client", () => {
@@ -104,7 +116,7 @@ test("a model of no credits is free, as magpie's built-in read them", () => {
 test("a refusal as {code, msg} says its msg, then the hint", async () => {
   const res = await explained(new Response(JSON.stringify({ code: 11004, msg: "Illegal API invocation from an unapproved channel" }), { status: 403 }))
   expect(res.status).toBe(403)
-  expect((await res.json()).error.message).toBe("Illegal API invocation from an unapproved channel — " + REFUSED_HINT)
+  expect((await res.json()).error.message).toBe("Illegal API invocation from an unapproved channel — " + REFUSED_DOC + " — " + REFUSED_HINT)
 })
 
 // a body handed over as bytes still gets WorkBuddy's system message

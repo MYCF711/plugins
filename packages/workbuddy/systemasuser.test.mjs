@@ -9,7 +9,7 @@ import { expect, test } from "bun:test"
 import { WorkBuddyAuthPlugin, WorkBuddyAIAuthPlugin, _internal } from "./index.mjs"
 import { unz } from "./testdata/unz.mjs"
 
-const { systemAsUser, REFUSED_HINT, DEFAULT_SYSTEM } = _internal
+const { systemAsUser, REFUSED_HINT, REFUSED_DOC, DEFAULT_SYSTEM } = _internal
 
 const REFUSAL = JSON.stringify({
   code: 11128,
@@ -106,6 +106,26 @@ test("a line refused anywhere in the system prompt is moved too", async () => {
   })
 })
 
+// An opening the plugin doesn't know is said with a comma before the system
+// prompt is moved: the move costs the agent the slot its instructions are
+// read in, and the comma keeps both the place and the harness's name.
+test("a refused opening FLAGGED doesn't know is said with a comma, not moved", async () => {
+  const opener = "You are an AI agent powered by Example Harness."
+  const uncommaed = (b) =>
+    b.messages.some((m) => (m.role === "system" || m.role === "assistant") && text(m.content).includes("You are an AI agent powered by Example Harness"))
+  await withService(
+    WorkBuddyAIAuthPlugin,
+    async (post, sent) => {
+      const res = await post({ messages: [{ role: "system", content: opener }, ask] })
+      expect(res.status).toBe(200)
+      expect(sent.length).toBe(2)
+      expect(sent[1].messages[0].role).toBe("system")
+      expect(sent[1].messages[0].content).toBe("You are an AI agent, powered by Example Harness.")
+    },
+    (b) => (uncommaed(b) ? new Response(REFUSAL, { status: 400, headers: { "content-type": "application/json; charset=utf-8" } }) : undefined),
+  )
+})
+
 test("a refusal that stands after the move is the user's, with the hint, tried once", async () => {
   const system = systemOf()
   await withService(WorkBuddyAuthPlugin, async (post, sent) => {
@@ -114,7 +134,7 @@ test("a refusal that stands after the move is the user's, with the hint, tried o
     expect(res.status).toBe(400)
     expect(sent.length).toBe(2)
     expect(res.headers.get("X-Magpie-Sign-In")).toBe("kept")
-    expect((await res.json()).error.message).toBe("Illegal API invocation from an unapproved channel — " + REFUSED_HINT)
+    expect((await res.json()).error.message).toBe("Illegal API invocation from an unapproved channel — " + REFUSED_DOC + " — " + REFUSED_HINT)
   })
 })
 

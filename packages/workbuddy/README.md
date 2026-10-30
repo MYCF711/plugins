@@ -174,21 +174,28 @@ default one, as the app does.
 
 WorkBuddy refuses some agents' identity lines as an "unapproved channel"
 (11128), so those lines are reworded before a chat goes out. Since 0.1.27
-(#279) that includes DeepSeek Harness's opening line. A refusal of words
-not reworded yet is sent once more, since 0.1.29, with the system prompt
-moved into the first user message (inside `<instructions>` tags) and
-WorkBuddy's default system prompt in its place: WorkBuddy checks only the
-system and assistant messages, and the line it matched is then in neither.
-A system message later in the chat becomes a user message where it stands.
-The plugin remembers each refused system prompt while it is loaded, so that
-agent's next chats go moved at once. The move can't reach an assistant
-message, so words the model quotes back into one keep that chat refused
-until they are in the list reworded in every message (since 0.1.30, the "Web GUI whose URL the runtime
-context names" line, #291); otherwise only a new chat clears it. A refusal
-that stands after the move ends in a hint that names no one client
-(since 0.1.28): WorkBuddy refused words in this client's prompt; use it from
-Hermes, OpenCode or Pi, or add another provider to the group. Neither
-refusal rests the account.
+(#279) that includes DeepSeek Harness's opening line. Since 0.2.2 a refusal
+of words not reworded yet is answered first by saying the same line with one
+more comma — a vendor matches such a line whole and exactly, so the comma
+passes it while the line still names the harness (measured 2026-10-30; a word
+added after the product name did not pass, the comma did). Only a chat refused
+still is sent once more, since 0.1.29, with the system prompt moved into the
+first user message (inside `<instructions>` tags) and WorkBuddy's default
+system prompt in its place: WorkBuddy checks only the system and assistant
+messages, and the line it matched is then in neither. A system message later
+in the chat becomes a user message where it stands. The plugin remembers each
+refused system prompt while it is loaded, so that agent's next chats go moved
+at once. The move can't reach an assistant message, so words the model quotes
+back into one keep that chat refused until they are in the list reworded in
+every message (since 0.1.30, the "Web GUI whose URL the runtime context names"
+line, #291); otherwise only a new chat clears it. A refusal that stands after
+the move ends in a hint that names no one client (since 0.1.28): WorkBuddy
+refused words in this client's prompt; use it from Hermes, OpenCode or Pi, or
+add another provider to the group. Since 0.2.2 that hint is preceded by the
+address of [REFUSED.md](REFUSED.md), which says what the check reads, how a
+line is reworded to pass it, and how to turn such a line off in an agent that
+has a switch for it — so the error carries its own fix, for the person who
+reads it or the agent they paste it to. Neither refusal rests the account.
 
 The loader also translates OpenAI-compatible request spellings WorkBuddy
 doesn't take: `max_completion_tokens` becomes `max_tokens`, `developer`
