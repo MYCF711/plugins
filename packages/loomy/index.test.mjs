@@ -81,6 +81,7 @@ describe("chat", () => {
   test("a genuinely over-length Kimi-k2.6 request still comes back 400", async () => {
     // 150 万 ASCII 字符 ≈ 37.5 万 token，对 262,144 窗口的 Kimi-k2.6 是真超长。
     // 旧实现按固定 200 万字符阈值判成「上游瞬时故障」并改成 502，magpie 会换号重试到整轮失败。
+    // 现在只改写文案、状态码不变，所以这里必须是 400、且台词换成 tooLongRe 认得的说法。
     fake.state.chatRefusal = "内容太长了，请精简输入或开启新对话"
     const loader = await plugin.auth.loader(getAuth)
     const huge = "word ".repeat(300_000)
