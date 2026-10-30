@@ -80,6 +80,46 @@ const expired = (message) => Object.assign(new Error(message), { signIn: "expire
 const errorResponse = (status, message) =>
   new Response(JSON.stringify({ error: { message } }), { status, headers: { "content-type": "application/json" } })
 
+/**
+ * 「内容太长了，请精简输入或开启新对话」 covers two very different situations:
+ * the request really is bigger than the model's window, and the upstream is
+ * merely busy. Neither wording names 「上下文」, so magpie's `tooLongRe`
+ * (`internal/gateway/gateway.go`) does not match it: the try is filed as an
+ * error that rests the account, the group's other members are never asked, and
+ * the whole turn fails.
+ *
+ * The request itself tells the two apart, so classify by size instead of
+ * trusting the wording:
+ *
+ *   · far below the declared window ⇒ not a length problem ⇒ 502, which magpie
+ *     retries on another account in seconds
+ *   · otherwise ⇒ rewrite to a wording `tooLongRe` knows, so the agent
+ *     compacts instead of the turn failing
+ *
+ * Measured 2026-10-30: an 838,400-token request succeeded while a 373,924-token
+ * one was refused this way, and the same window carried `429 模型服务当前繁忙`.
+ */
+const TOO_LONG_SAID = /内容太长(了)?|内容过长/
+const TOO_LONG_REWORDED = "上下文超出长度限制"
+/** Below this many characters a request cannot be over a 1M-token window */
+const NOT_TOO_LONG_MAX_CHARS = 2_000_000
+
+function retryableRefusal(status, body, requestChars) {
+  if (status !== 400 && status !== 413 && status !== 422) return null
+  if (!TOO_LONG_SAID.test(body)) return null
+  const momentary = requestChars > 0 && requestChars < NOT_TOO_LONG_MAX_CHARS
+  if (momentary) {
+    return new Response(body, {
+      status: 502,
+      headers: { "content-type": "application/json", "x-loomy-classified": "momentary" },
+    })
+  }
+  return new Response(body.replace(TOO_LONG_SAID, TOO_LONG_REWORDED), {
+    status,
+    headers: { "content-type": "application/json", "x-loomy-vendor-status": String(status) },
+  })
+}
+
 async function bodyText(input, init) {
   const b = init.body ?? (input instanceof Request ? await input.clone().text() : undefined)
   return typeof b === "string" ? b : new TextDecoder().decode(b)
@@ -394,8 +434,12 @@ export async function LoomyAuthPlugin({ client } = {}) {
               return errorResponse(502, e?.message ?? String(e))
             }
             if (res.status === 401 || res.status === 403) return errorResponse(401, "Loomy 登录态已失效，请重新登录")
-            if (!res.ok)
-              return errorResponse(res.status, `Loomy 上游返回 ${res.status}: ${(await res.text().catch(() => "")).slice(0, 4096) || "无错误说明"}`)
+            if (!res.ok) {
+              const raw = await res.text().catch(() => "")
+              const refusal = retryableRefusal(res.status, raw, JSON.stringify(chat).length)
+              if (refusal) return refusal
+              return errorResponse(res.status, `Loomy 上游返回 ${res.status}: ${raw.slice(0, 4096) || "无错误说明"}`)
+            }
             // the answer streams through as it came (OpenAI-shaped)
             return res
           },
@@ -525,6 +569,7 @@ export async function LoomyAuthPlugin({ client } = {}) {
 
 // for tests
 export const _internal = {
+  retryableRefusal,
   ID,
   NAME,
   STATIC_MODELS,
