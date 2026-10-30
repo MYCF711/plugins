@@ -42,7 +42,7 @@
 // replaces its browser sign-in + bearer-token requests with CodeArts' OAuth +
 // signed-request flow. See README.md.
 
-import { createHash } from "node:crypto"
+import { createHash, createHmac } from "node:crypto"
 import { createServer } from "node:http"
 import fs from "node:fs"
 import os from "node:os"
@@ -2485,9 +2485,14 @@ export const CodeArtsAuthPlugin = async ({ client } = {}, options = {}) => {
     const state = await stateOf(cred)
     if (state.renewed?.from === token) return state.renewed.next
     if (state.renewing?.from !== token) {
-      const promise = refreshCredential(cred, fetcher)
-        .then((next) => {
+      const promise = renewSharedCredential(cred, () => refreshCredential(cred, fetcher))
+        .then(async (next) => {
           state.renewed = { from: token, next }
+          rememberLiveAccount(next)
+          // The OfficeAce record of this account is the same sign-in: hand it
+          // the renewed credential as well, so neither record is left with a
+          // refresh token the other has already spent.
+          await pushSharedRecord(client, OFFICEACE_PROVIDER, next, fetcher)
           return next
         })
         .finally(() => {
@@ -2552,7 +2557,15 @@ export const CodeArtsAuthPlugin = async ({ client } = {}, options = {}) => {
       id: PROVIDER,
       async models(provider, { auth } = {}) {
         const cred = credentialOf(auth)
-        if (!cred?.access_key_id) return provider.models
+        if (!cred?.access_key_id) {
+          // A models hook that runs with no auth is a provider with no accounts;
+          // the OfficeAce card reads that to carry this sign-in over.
+          noteProviderEmpty(PROVIDER)
+          return provider.models
+        }
+        rememberLiveAccount(cred)
+        const identity = accountIdentityOf(cred).id
+        if (identity) noteProviderAccount(PROVIDER, identity)
         try {
           const state = await stateOf(cred)
           const list = await fetchRemoteModels(cred, fetcher, state)
@@ -2604,6 +2617,9 @@ export const CodeArtsAuthPlugin = async ({ client } = {}, options = {}) => {
         let account = await getAuth()
         let cred = credentialOf(account)
         if (!cred?.access_key_id || !cred?.secret_access_key) return {}
+        rememberLiveAccount(cred)
+        const identity = accountIdentityOf(cred).id
+        if (identity) noteProviderAccount(PROVIDER, identity)
 
         // magpie renews ahead of expiry by itself; this covers hosts that
         // ignore `auth.refresh` (OpenCode) and a credential that went stale
@@ -2683,6 +2699,9 @@ export const CodeArtsAuthPlugin = async ({ client } = {}, options = {}) => {
         const auth = await getAuth()
         const cred = credentialOf(auth)
         if (!cred?.access_key_id) return { error: "not signed in", windows: [] }
+        rememberLiveAccount(cred)
+        const identity = accountIdentityOf(cred).id
+        if (identity) noteProviderAccount(PROVIDER, identity)
         try {
           const text = await signedGet(SNAP_STATISTICS_URL, cred, fetcher, SNAP_EXTRA_HEADERS)
           if (text === undefined) return { error: "CodeArts answered an error", windows: [] }
@@ -2765,18 +2784,30 @@ export const CodeArtsAuthPlugin = async ({ client } = {}, options = {}) => {
                   // a failed read still signs in), shown through usage's
                   // `user`; the credential carries it as `user_phone`.
                   const identified = { ...cred, ...(await accountPhoneField(cred, fetcher)) }
-                  const identity = accountIdentityOf(identified)
+                  // The MaaS pair OfficeAce needs is read once here (best effort:
+                  // an account that never opened MaaS signs in all the same), and
+                  // kept on this credential too, so a later rotation of this
+                  // record hands the other one a credential that still has it.
+                  const withMaas = await withOfficeAceMaas(identified, fetcher)
+                  const identity = accountIdentityOf(withMaas)
                   // `accountId` is the account's identity — the URN, as main
                   // gives it — so a re-sign-in replaces the account instead of
                   // adding a `codearts#xxxxxx`; `uid` is that same URN.
-                  return {
+                  const record = {
                     type: "success",
-                    access: JSON.stringify(identified),
+                    access: JSON.stringify(withMaas),
                     refresh: cred.refresh_token,
                     expires: outcome.expires,
                     accountId: identity.id,
                     ...(identity.id ? { uid: identity.id } : {}),
                   }
+                  // One Huawei Cloud sign-in serves both providers: the OfficeAce
+                  // card is given this same account (in its own record shape), and
+                  // this card's record is put at a key a renewal can find again,
+                  // so the two records of one account stay in step.
+                  await writeSharedRecord(client, OFFICEACE_PROVIDER, withMaas, fetcher)
+                  await writeSharedRecord(client, PROVIDER, withMaas, fetcher)
+                  return record
                 } catch (e) {
                   return { type: "failed", error: e?.message ?? String(e) }
                 } finally {
@@ -2855,3 +2886,1225 @@ export const _internal = {
   snapRequest, dailyCheckin,
   parseModelInfo, extractArray, fetchRemoteModels, creditWindow, benefitWindow, usageFromStatistics,
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// OfficeAce — a second provider from the same Huawei Cloud sign-in
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// OfficeAce (华为云 AgentArts / MaaS) runs on the same Huawei Cloud IAM account
+// as CodeArts. Measured with a real account on 2026-10-30, read-only:
+//
+//   * a CodeArts STS triple signs OfficeAce's subscription read
+//     (V11-HMAC `GET …/v1/subscription`, HTTP 200, same `domain_id`) and passes
+//     its CLAW permission check (`…/v1/claw/client-permission-validate`);
+//   * an OfficeAce STS triple signs CodeArts' `snap-access` reads byte for byte
+//     the same way the CodeArts triple does.
+//
+// So one sign-in is one credential, and both providers are served from it. The
+// second provider keeps its record in the shape `officeace-auth` (the package
+// this one absorbs) has always written — `access` is a JSON string carrying
+// `modelAppKey` / `securityToken` / `dpopPrivateJwk` … — so the accounts signed
+// in through that package keep working without signing in again. The account
+// is stored under the same provider id it always had (`officeace`), so its
+// records are exactly where magpie already keeps them.
+//
+// The two records of one account must not share one rotating refresh token:
+// STS spends a refresh token once, and two records refreshing the same chain
+// would turn each other away. So a record written from a sign-in at the other
+// provider lives at `<provider>#<hash of the account's identity>` and every
+// renewal of either record is handed to the other in the same process (and
+// pushed to the other's record when its key is one of ours).
+
+/** The OfficeAce provider id — the one the `officeace-auth` package used. */
+const OFFICEACE_PROVIDER = "officeace"
+const OFFICEACE_NPM = "@ai-sdk/openai-compatible"
+
+// The three domains, never mixed (each measured; see the OfficeAce internals):
+//   CLAW          sign-in permission check (the MaaS appKey lives behind it)
+//   STS           token exchange — the same endpoint CodeArts uses
+//   MaaS          model catalog and chat
+//   subscription  usage, credit rates and the daily check-in
+const OA_CLAW_BASE = "https://agentarts.cn-southwest-2.myhuaweicloud.com"
+const OA_PERMISSION_PATH = "/v1/claw/client-permission-validate"
+const OA_SUBSCRIPTION_BASE = "https://officeace.cn-southwest-2.huaweicloud-agentarts.com"
+const OA_SUBSCRIPTION_PATH = "/v1/subscription"
+const OA_TOKEN_RATES_PATH = "/v1/model-token-rates"
+const OA_BONUS_CLAIM_PATH = "/v1/subscription/bonus/claim"
+const OA_MAAS_MARKET_BASE = "https://api.modelarts-maas.com"
+const OA_MODELS_PATH = "/v2/models"
+const OA_CHAT_PATH = "/v2/chat/completions"
+const OA_REGION = "cn-southwest-2"
+const OA_SERVICE = "apic"
+/** The OAuth client OfficeAce's own sign-in uses (its old package's refreshes). */
+const OA_AGENTARTS_CLIENT_ID = "pdp5_for_agentarts"
+const OA_RATES_TTL_MS = 20 * 60 * 1000
+const OA_REFRESH_LEAD_MS = 10 * 60 * 1000
+const OA_TOKEN_TIMEOUT_MS = 30_000
+
+/** The models OfficeAce shows before anyone is signed in (its own desktop list). */
+const OA_FALLBACK_MODELS = {
+  "glm-5.3": { name: "GLM-5.3", context: 1_000_000, output: 128_000 },
+  "glm-5.2": { name: "GLM-5.2", context: 1_000_000, output: 128_000 },
+  "glm-5.1": { name: "GLM-5.1", context: 1_000_000, output: 128_000 },
+  "deepseek-v4": { name: "DeepSeek-V4", context: 1_000_000, output: 128_000 },
+  "deepseek-v4.1": { name: "DeepSeek-V4.1", context: 1_000_000, output: 128_000 },
+  "qwen3-30b": { name: "Qwen3 30B", context: 1_000_000, output: 128_000 },
+  "qwen3-32b": { name: "Qwen3 32B", context: 1_000_000, output: 128_000 },
+  "kimi-k2.6": { name: "Kimi-K2.6", context: 1_000_000, output: 128_000 },
+  "pangu-2.0-pro": { name: "盘古 2.0 Pro", context: 1_000_000, output: 128_000 },
+  "pangu-2.0-flash": { name: "盘古 2.0 Flash", context: 1_000_000, output: 128_000 },
+}
+
+/**
+ * Registry ids that answer `404 ModelArts.81009 Invalid model` on chat whatever
+ * the headers (measured; `deepseek-v4.1-flash-1017` stays 404 even with
+ * `maas_type: benefit`). Never listed, whatever the catalog says.
+ */
+const OA_UNAVAILABLE_IDS = new Set([
+  "deepseek-v4.1-flash-1017",
+  "deepseek-v4.1-flash-bnt",
+  "deepseek-v4-pro",
+])
+
+/** OfficeAce's own icon (its `.ico` as a 128×128 PNG). */
+const OFFICEACE_ICON = "data:image/png;base64,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"
+
+// ---- one credential, two shapes -------------------------------------------
+
+/**
+ * A Huawei Cloud STS credential in this package's internal shape — the shape
+ * CodeArts has always stored (`access_key_id`, `secret_access_key`,
+ * `security_token`, `refresh_token`, `dpop_private_key_jwk` …) plus the MaaS
+ * fields OfficeAce needs (`model_app_key`, `model_app_secret`, `maas_base_url`).
+ *
+ * OfficeAce's own package stored the same credential under different names
+ * (`access`, `secret`, `securityToken`, `modelAppKey`, `dpopPrivateJwk` …).
+ * `officeAceCredentialOf` reads either and gives this one; `officeAceRecordOf`
+ * writes it back in OfficeAce's shape, so a record is readable by both.
+ */
+function officeAceCredentialOf(auth) {
+  if (!auth) return null
+  const raw = typeof auth.access === "string" ? safeJson(auth.access) : asRecord(auth.access)
+  const flat = raw && typeof raw === "object" ? raw : asRecord(auth)
+  const pick = (...vs) => firstOf(...vs)
+
+  const access = pick(flat.access_key_id, flat.access)
+  const secret = pick(flat.secret_access_key, flat.secret)
+  const securityToken = pick(flat.security_token, flat.securityToken)
+  // A record with only the STS triple is a sign-in too: usage and the check-in
+  // are signed with it alone (the MaaS appKey only guards catalog and chat).
+  if (!access || !secret || !securityToken) return null
+
+  // Which OAuth client issued the refresh token. The CodeArts field names are
+  // this package's own flow; OfficeAce's (`access` / `securityToken`) are the
+  // old package's, whose refreshes were asked for as `pdp5_for_agentarts`.
+  // `oauth_client` is written down when a record says it, so a derived record
+  // is renewed the way it was made.
+  const codeArtsShape = !!flat.access_key_id && !!flat.secret_access_key
+  const profile = profileOf({ refresh_token: pick(flat.refresh_token, auth.refresh) }) || {}
+  const domain = pick(flat.domain_id, flat.accountId, profile.account_id, profile.domain_id)
+  return {
+    access_key_id: access,
+    secret_access_key: secret,
+    security_token: securityToken,
+    expires_at: pick(flat.expires_at, flat.expiresAt, typeof auth.expires === "number" ? new Date(auth.expires).toISOString() : ""),
+    refresh_token: pick(auth.refresh, flat.refresh_token, flat.refreshToken),
+    code_verifier: pick(flat.code_verifier, flat.codeVerifier),
+    dpop_private_key_jwk: flat.dpop_private_key_jwk ?? flat.dpopPrivateJwk ?? null,
+    session_id: pick(flat.session_id),
+    user_phone: pick(flat.user_phone, auth.user_phone),
+    domain_id: domain,
+    model_app_key: pick(flat.model_app_key, flat.modelAppKey),
+    model_app_secret: pick(flat.model_app_secret, flat.modelAppSecret),
+    maas_base_url: pick(flat.maas_base_url, flat.maasBaseUrl),
+    oauth_client: pick(flat.oauth_client, flat.oauthClient, codeArtsShape ? "codearts-agent" : OA_AGENTARTS_CLIENT_ID),
+  }
+}
+
+/** Is this credential one this package's own CodeArts sign-in issued? */
+const isCodeArtsClient = (cred) => cred?.oauth_client === "codearts-agent"
+
+/** The credential as `officeace-auth` stores it (its historical shape). */
+function officeAceCredentialRecord(cred) {
+  const identity = accountIdentityOf(cred)
+  const profile = profileOf(cred) || {}
+  return {
+    modelAppKey: firstOf(cred.model_app_key),
+    modelAppSecret: firstOf(cred.model_app_secret),
+    maasBaseUrl: firstOf(cred.maas_base_url),
+    access: firstOf(cred.access_key_id),
+    secret: firstOf(cred.secret_access_key),
+    securityToken: firstOf(cred.security_token),
+    projectId: "",
+    expiresAt: firstOf(cred.expires_at),
+    refreshToken: firstOf(cred.refresh_token),
+    codeVerifier: firstOf(cred.code_verifier),
+    dpopPrivateJwk: cred.dpop_private_key_jwk ?? null,
+    session_id: firstOf(cred.session_id),
+    accountId: firstOf(profile.account_id, profile.domain_id, cred.domain_id),
+    user_phone: firstOf(cred.user_phone),
+    // A record written from a credential with no marker of its own is one this
+    // package's CodeArts sign-in (or a rotation of it) issued.
+    oauth_client: firstOf(cred.oauth_client, "codearts-agent"),
+    ...(identity.id ? { uid: identity.id } : {}),
+  }
+}
+
+/** `{ accountId, uid }` as the OfficeAce card has always shown them. */
+function officeAceIdentityOf(cred) {
+  const profile = profileOf(cred) || {}
+  const domain = firstOf(profile.account_id, profile.domain_id, cred?.domain_id)
+  return {
+    accountId: firstOf(cred?.user_phone, domain),
+    uid: domain,
+  }
+}
+
+/** The `{type, refresh, access, expires, accountId, uid}` magpie keeps for OfficeAce. */
+function officeAceRecordBody(cred) {
+  const identity = officeAceIdentityOf(cred)
+  return {
+    type: "oauth",
+    refresh: firstOf(cred.refresh_token),
+    access: JSON.stringify(officeAceCredentialRecord(cred)),
+    expires: expiresFromCredential(cred),
+    ...(identity.accountId ? { accountId: identity.accountId } : {}),
+    ...(identity.uid ? { uid: identity.uid } : {}),
+  }
+}
+
+/** The same record in CodeArts' shape (for the sibling write). */
+function codeArtsRecordBody(cred) {
+  const identity = accountIdentityOf(cred)
+  return {
+    type: "oauth",
+    refresh: firstOf(cred.refresh_token),
+    access: JSON.stringify(cred),
+    expires: expiresFromCredential(cred),
+    ...(identity.id ? { accountId: identity.id, uid: identity.id } : {}),
+  }
+}
+
+/** The MaaS base URL a credential names, or the official one (空串/裸域名 both handled). */
+function officeAceMaasBase(cred) {
+  const raw = cred?.maas_base_url
+  if (typeof raw !== "string" || raw.length === 0) return OA_MAAS_MARKET_BASE
+  const trimmed = raw.replace(/\/+$/, "")
+  return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`
+}
+
+// ---- V11-HMAC-SHA256: what the subscription API checks --------------------
+
+/** `20261030T081500Z` — the X-Sdk-Date form both Huawei signers use. */
+function oaSdkDate(now = new Date()) {
+  return now.toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z")
+}
+
+/**
+ * Sign one OfficeAce subscription request (V11-HMAC-SHA256).
+ *
+ * The differences from the SDK-HMAC signer above are all load-bearing (each
+ * was measured against the live gateway):
+ *   * the key is derived: HMAC(HMAC(access, secret), scope + 0x01), first 32
+ *     bytes hex, and that hex string is the signing key;
+ *   * `X-Security-Token` and `x-subscription-type: v2` are mandatory;
+ *   * the canonical URI is decoded and re-encoded segment by segment.
+ */
+function signOfficeAceV11(urlStr, cred, method = "GET", body, dateOverride) {
+  const url = new URL(urlStr)
+  const xdate = dateOverride ?? oaSdkDate()
+  const path = url.pathname.split("/").map((s) => rfc3986(decodeURIComponent(s))).join("/")
+  const canonicalUri = path.endsWith("/") ? path : `${path}/`
+
+  const original = {
+    "x-subscription-type": "v2",
+    "X-Sdk-Date": xdate,
+    "X-Security-Token": String(cred.security_token ?? "").trim(),
+    Host: url.host,
+  }
+  if (method === "POST") original["Content-Type"] = "application/json;charset=utf8"
+  if (cred.project_id) original["X-Project-ID"] = cred.project_id
+
+  const lower = {}
+  for (const [k, v] of Object.entries(original)) lower[k.toLowerCase()] = String(v).trim().replace(/\s+/g, " ")
+  const signedHeaders = Object.keys(lower).sort()
+  const canonicalHeaders = signedHeaders.map((h) => `${h}:${lower[h]}\n`).join("")
+
+  const payloadHash = createHash("sha256").update(body ?? "", "utf8").digest("hex")
+  const canonicalRequest = [
+    method, canonicalUri, canonicalQuery(url), canonicalHeaders, signedHeaders.join(";"), payloadHash,
+  ].join("\n")
+
+  const scope = `${xdate.slice(0, 8)}/${OA_REGION}/${OA_SERVICE}`
+  const stringToSign = [
+    "V11-HMAC-SHA256", xdate, scope, createHash("sha256").update(canonicalRequest).digest("hex"),
+  ].join("\n")
+
+  const u1 = createHmac("sha256", cred.access_key_id).update(cred.secret_access_key).digest()
+  const derivedKey = createHmac("sha256", u1)
+    .update(Buffer.concat([Buffer.from(scope, "utf8"), Buffer.from([1])]))
+    .digest()
+    .subarray(0, 32)
+    .toString("hex")
+  const signature = createHmac("sha256", Buffer.from(derivedKey, "utf8")).update(stringToSign).digest("hex")
+
+  return {
+    ...original,
+    Authorization: `V11-HMAC-SHA256 Credential=${cred.access_key_id}/${scope}, SignedHeaders=${signedHeaders.join(";")}, Signature=${signature}`,
+  }
+}
+
+/** One signed OfficeAce request; a network error is `status: 0` with its reason. */
+async function officeAceSigned(cred, urlStr, method = "GET", body, fetcher = fetch) {
+  const headers = signOfficeAceV11(urlStr, cred, method, body)
+  try {
+    const res = await fetcher(urlStr, {
+      method,
+      headers,
+      ...(body === undefined ? {} : { body }),
+      signal: AbortSignal.timeout(OA_TOKEN_TIMEOUT_MS),
+    })
+    const text = await res.text().catch(() => "")
+    return { ok: res.ok, status: res.status, text }
+  } catch (e) {
+    return { ok: false, status: 0, text: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+// ---- the MaaS appKey: the CLAW permission check --------------------------
+
+/**
+ * Read the account's MaaS Basic credentials and base URL from the CLAW
+ * permission check — the same call OfficeAce's own sign-in ends with, signed
+ * with the STS triple every Huawei Cloud sign-in yields. An account that has
+ * not opened MaaS answers without `model_auth_info`: that is not a failure,
+ * it only means catalog/chat have nothing to use yet.
+ */
+async function fetchOfficeAceMaasInfo(cred, fetcher = fetch) {
+  const url = `${OA_CLAW_BASE}${OA_PERMISSION_PATH}`
+  const extra = { "content-type": "application/json" }
+  const signed = await signRequestHuawei(
+    cred.access_key_id, cred.secret_access_key, cred.security_token, "GET", url, new Uint8Array(), extra,
+  )
+  const headers = new Headers()
+  signed.forEach((value, key) => {
+    if (key !== "host") headers.set(key, value)
+  })
+  const res = await fetcher(url, { method: "GET", headers, redirect: "error", signal: AbortSignal.timeout(OA_TOKEN_TIMEOUT_MS) })
+  if (!res.ok) throw new Error(`OfficeAce permission check failed: HTTP ${res.status}`)
+  const body = await res.json().catch(() => null)
+  const info = body?.subscription?.model_info
+  const auth = info?.model_auth_info
+  return {
+    model_app_key: typeof auth?.model_app_key === "string" ? auth.model_app_key : "",
+    model_app_secret: typeof auth?.model_app_secret === "string" ? auth.model_app_secret : "",
+    maas_base_url: typeof info?.model_api_url_base === "string" ? info.model_api_url_base : "",
+  }
+}
+
+/** The MaaS fields of one account, read at most once per process (best effort). */
+const oaMaasCache = new Map() // identity → { at, info }
+
+async function officeAceMaasInfo(cred, fetcher = fetch) {
+  const identity = accountIdentityOf(cred).id || cred.session_id || cred.access_key_id
+  const hit = oaMaasCache.get(identity)
+  if (hit && Date.now() - hit.at < 6 * 60 * 60 * 1000) return hit.info
+  const info = await fetchOfficeAceMaasInfo(cred, fetcher).catch(() => null)
+  if (info) oaMaasCache.set(identity, { at: Date.now(), info })
+  return info
+}
+
+// ---- the OfficeAce API ---------------------------------------------------
+
+/** Credit multipliers per account; a failed read keeps the last good table. */
+const oaRatesCache = new Map() // identity → { at, map }
+
+/**
+ * `GET {SUB}/v1/model-token-rates` — the billable list. It is the whitelist the
+ * catalog is cut down to: the catalog lists 26 registry entries, 19 of which
+ * cannot be called; the rates list is what the OfficeAce desktop shows.
+ *
+ * A failure returns the last good table rather than an empty one: an empty
+ * table would disable the whitelist downstream and put the uncallable ids back
+ * in front of the user (measured defect, 2026-10-26).
+ */
+async function fetchOfficeAceTokenRates(cred, fetcher = fetch) {
+  const identity = accountIdentityOf(cred).id || cred.session_id || cred.access_key_id
+  const hit = oaRatesCache.get(identity)
+  if (hit && hit.map.size > 0 && Date.now() - hit.at < OA_RATES_TTL_MS) return hit.map
+  const keepStale = () => {
+    if (hit) oaRatesCache.set(identity, { at: Date.now(), map: hit.map })
+    return hit?.map ?? new Map()
+  }
+
+  const r = await officeAceSigned(cred, `${OA_SUBSCRIPTION_BASE}${OA_TOKEN_RATES_PATH}`, "GET", undefined, fetcher)
+  if (!r.ok) return keepStale()
+  let j
+  try {
+    j = JSON.parse(r.text)
+  } catch {
+    return keepStale()
+  }
+  const rows = Array.isArray(j) ? j : Array.isArray(j?.models) ? j.models : Array.isArray(j?.data) ? j.data : Array.isArray(j?.rates) ? j.rates : []
+  const map = new Map()
+  for (const row of rows) {
+    const raw = row?.model_name ?? row?.modelName ?? row?.model ?? row?.name
+    // the vendor's `model_name` carries a trailing newline ("kimi-k3\n")
+    const name = typeof raw === "string" ? raw.trim() : ""
+    const rate = Number(row?.cost_coefficient ?? row?.costCoefficient ?? row?.rate)
+    if (name && Number.isFinite(rate)) map.set(name, rate)
+  }
+  if (map.size === 0) return keepStale()
+  oaRatesCache.set(identity, { at: Date.now(), map })
+  return map
+}
+
+/** `GET {maas}/v2/models`, names carrying the account's multiplier (`· x1.5`). */
+async function fetchOfficeAceCatalog(cred, fetcher = fetch) {
+  const r = await fetcher(`${officeAceMaasBase(cred)}${OA_MODELS_PATH}`, {
+    headers: { Accept: "application/json", Authorization: basicAuthorization(cred) },
+    signal: AbortSignal.timeout(OA_TOKEN_TIMEOUT_MS),
+  })
+  if (!r.ok) throw new Error(`OfficeAce catalog read failed: HTTP ${r.status}`)
+  const body = await r.json().catch(() => null)
+  const rows = Array.isArray(body) ? body : Array.isArray(body?.data) ? body.data : []
+  const rates = await fetchOfficeAceTokenRates(cred, fetcher).catch(() => new Map())
+  const out = []
+  for (const row of rows) {
+    const id = (typeof row === "string" ? row : typeof row?.id === "string" ? row.id : "").trim()
+    if (!id) continue
+    const base = typeof row?.name === "string" && row.name.trim() ? row.name.trim() : id
+    const rate = rates.get(id)
+    out.push({ id, name: rate !== undefined && rate !== 1 ? `${base} · x${rate}` : base })
+  }
+  return out
+}
+
+/** One OfficeAce model entry, as magpie wants it. */
+function officeAceModelEntry({ id, name, baseUrl = OA_MAAS_MARKET_BASE, context = 1_000_000, output = 128_000 }) {
+  return {
+    id,
+    name,
+    api: { id, url: `${baseUrl}/v2`, npm: OFFICEACE_NPM },
+    status: "active",
+    headers: {},
+    options: {},
+    cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+    limit: { context, output },
+    capabilities: {
+      temperature: true,
+      reasoning: true,
+      attachment: false,
+      toolcall: true,
+      input: { text: true, image: false, audio: false, video: false, pdf: false },
+      output: { text: true, image: false, audio: false, video: false, pdf: false },
+      interleaved: false,
+    },
+    release_date: "",
+    variants: {},
+  }
+}
+
+/** The static table `config` hands magpie before a sign-in (never "0 models"). */
+function officeAceStaticModels() {
+  const out = {}
+  for (const [id, def] of Object.entries(OA_FALLBACK_MODELS)) {
+    out[id] = officeAceModelEntry({ id, name: def.name, context: def.context, output: def.output })
+  }
+  return out
+}
+
+/** The account's own catalog: catalog ∩ rates, minus the ids that always 404. */
+function officeAceLiveModels(rows, baseUrl, rates) {
+  const out = {}
+  for (const row of rows) {
+    const id = typeof row === "string" ? row : row?.id
+    if (typeof id !== "string" || id.length === 0) continue
+    if (OA_UNAVAILABLE_IDS.has(id)) continue
+    if (rates && rates.size > 0 && !rates.has(id)) continue
+    const known = OA_FALLBACK_MODELS[id]
+    out[id] = officeAceModelEntry({
+      id,
+      name: typeof row?.name === "string" && row.name.length > 0 ? row.name : id,
+      baseUrl,
+      context: known?.context ?? 1_000_000,
+      output: known?.output ?? 128_000,
+    })
+  }
+  return out
+}
+
+/**
+ * One usage window.
+ *
+ * An expired bucket is folded away (`aside`) and carries no amount/limit: its
+ * own total would become the denominator and read as "100% left". It takes no
+ * part in routing either, so the fold is all it needs to say.
+ */
+function officeAceWindow({ name, used, display, unit, resetsAt = "", expired = false, amount = 0, limit = 0 }) {
+  return {
+    name,
+    used,
+    display,
+    unit,
+    ...(resetsAt ? { resetsAt } : {}),
+    ...(expired ? { aside: true } : { amount, limit, span: 0 }),
+  }
+}
+
+/**
+ * `GET {SUB}/v1/subscription` → magpie windows.
+ *
+ * Two kinds of bucket: `skus[].quotas[]` (`sku_attr_code === 'officeace_points'`)
+ * and `bonus_skus[]`. A `.trial` sku carries no expiry (the trial never
+ * expires — show it as it is, never guess a date); an expired bucket is marked
+ * `aside` so the card folds it away instead of letting it hold the top slot.
+ */
+async function fetchOfficeAceUsage(cred, fetcher = fetch) {
+  const r = await officeAceSigned(cred, `${OA_SUBSCRIPTION_BASE}${OA_SUBSCRIPTION_PATH}`, "GET", undefined, fetcher)
+  if (!r.ok) {
+    const detail = r.text.trim().slice(0, 200)
+    throw new Error(`订阅查询失败：HTTP ${r.status}${detail === "" ? "" : `：${detail}`}`)
+  }
+  let j
+  try {
+    j = JSON.parse(r.text)
+  } catch {
+    throw new Error("订阅查询失败：响应不是 JSON")
+  }
+
+  const round = (n) => Math.round(n * 100) / 100
+  const windows = []
+  const nowMs = Date.now()
+  let plan = ""
+
+  for (const sku of Array.isArray(j?.skus) ? j.skus : []) {
+    for (const q of Array.isArray(sku?.quotas) ? sku.quotas : []) {
+      if (q?.sku_attr_code !== "officeace_points") continue
+      const total = Number(q.sku_value)
+      const used = Number(q.current_value)
+      if (!Number.isFinite(total) || total <= 0) continue
+      const isTrial = String(sku.sku_code ?? "").endsWith(".trial")
+      const expiresAt = typeof q.expired_time === "string" && q.expired_time.length > 0 ? q.expired_time : null
+      const remaining = Math.max(0, total - used)
+      const expired = expiresAt !== null && !isTrial && new Date(expiresAt).getTime() <= nowMs
+      if (!plan && typeof sku.sku_name === "string") plan = sku.sku_name
+      windows.push(officeAceWindow({
+        name: `${sku.sku_name ?? "套餐"} · 剩 ${round(remaining)}`,
+        used: Math.min(100, Math.max(0, Math.round((used / total) * 100))),
+        // a `.trial` sku carries no expiry: nothing to invent
+        resetsAt: isTrial || expiresAt === null ? "" : new Date(expiresAt).toISOString(),
+        display: `${round(remaining)} / ${round(total)}`,
+        unit: "积分",
+        expired,
+        amount: used,
+        limit: total,
+      }))
+    }
+  }
+
+  for (const bonus of Array.isArray(j?.bonus_skus) ? j.bonus_skus : []) {
+    const points = Number(bonus?.points)
+    if (!Number.isFinite(points) || points <= 0) continue
+    const used = Number(bonus.current_value)
+    const remaining = Math.max(0, points - (Number.isFinite(used) ? used : 0))
+    const expiresAt = typeof bonus.expired_time === "string" ? bonus.expired_time : null
+    const expired = expiresAt !== null && new Date(expiresAt).getTime() <= nowMs
+    windows.push(officeAceWindow({
+      name: `${bonus.activity_name ?? "活动奖励"} · 剩 ${round(remaining)}`,
+      used: Math.min(100, Math.round(((points - remaining) / points) * 100)),
+      resetsAt: expiresAt === null ? "" : new Date(expiresAt).toISOString(),
+      display: `${round(remaining)} / ${round(points)}`,
+      unit: "积分",
+      expired,
+      amount: points - remaining,
+      limit: points,
+    }))
+  }
+
+  return { plan, windows }
+}
+
+/**
+ * `POST {SUB}/v1/subscription/bonus/claim` — the daily check-in.
+ *
+ * Claiming twice is idempotent: a 2xx with no `bonus_skus` is `done` (today's
+ * already taken), not a failure. A 2xx that does not parse is `done` too (the
+ * claim itself may have gone through).
+ */
+async function officeAceCheckin(cred, fetcher = fetch) {
+  if (!cred?.access_key_id || !cred?.security_token) {
+    return { outcome: "failed", message: "凭据缺失（access 或 securityToken），未发起签到" }
+  }
+  const r = await officeAceSigned(cred, `${OA_SUBSCRIPTION_BASE}${OA_BONUS_CLAIM_PATH}`, "POST", undefined, fetcher)
+  if (!r.ok || r.status < 200 || r.status >= 300) {
+    const detail = r.text.trim().slice(0, 200)
+    return {
+      outcome: "failed",
+      message: `HTTP ${r.status === 0 ? "（未发出/无响应）" : r.status}${detail === "" ? "" : `：${detail}`}`,
+    }
+  }
+  if (r.text.length === 0) return { outcome: "claimed", message: "已领取（响应为空）" }
+  let j
+  try {
+    j = JSON.parse(r.text)
+  } catch {
+    return { outcome: "done", message: "已领取（响应无法解析）" }
+  }
+  const skus = (Array.isArray(j?.bonus_skus) ? j.bonus_skus : []).map((s) => ({
+    name: typeof s?.activity_name === "string" ? s.activity_name : "活动奖励",
+    points: Number(s?.points) || 0,
+  }))
+  const credit = skus.reduce((sum, s) => sum + s.points, 0)
+  if (skus.length === 0) return { outcome: "done", message: "今日已无新增可领" }
+  return {
+    outcome: "claimed",
+    ...(credit > 0 ? { credit } : {}),
+    message: skus.map((s) => `${s.name} +${s.points}`).join("；"),
+  }
+}
+
+/** `officeace/<id>` → `<id>`: magpie names the model with the provider prefix. */
+function officeAceStripPrefix(body) {
+  if (typeof body !== "string" || body.length === 0) return body
+  try {
+    const parsed = JSON.parse(body)
+    if (typeof parsed?.model === "string" && parsed.model.startsWith("officeace/")) {
+      parsed.model = parsed.model.slice("officeace/".length)
+      return JSON.stringify(parsed)
+    }
+  } catch {
+    // not JSON: pass it through
+  }
+  return body
+}
+
+/** `base64(appKey:appSecret)` — MaaS takes Basic, the AI SDK only sends Bearer. */
+function basicAuthorization(cred) {
+  return "Basic " + Buffer.from(`${cred.model_app_key}:${cred.model_app_secret}`).toString("base64")
+}
+
+const oaBasicFingerprint = (cred) => `${cred?.model_app_key ?? ""}:${cred?.model_app_secret ?? ""}:${cred?.maas_base_url ?? ""}`
+
+/** Is this 4xx the gateway refusing the Basic pair itself? */
+function isOfficeAceBasicRejection(status, text) {
+  if (status === 401 || status === 403) return true
+  if (status < 400 || status >= 500) return false
+  return /APIG\.1009|invalid.*(app|key|secret)|appkey|app_key/i.test(text ?? "")
+}
+
+/**
+ * One chat request to OfficeAce's MaaS: Bearer is rewritten to Basic, the
+ * provider prefix stripped. A 401 (or the gateway naming the Basic pair)
+ * renews the credential once and sends the request again — but only when the
+ * renewal actually changed the pair; retrying the same pair would just be the
+ * same refusal with more latency.
+ */
+async function officeAceChatFetch({ input, init, credential, renew, fetcher = fetch }) {
+  const req = input instanceof Request ? input : null
+  const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : (req?.url ?? "")
+  let body = init?.body
+  if (body === undefined && req) body = await req.text()
+  body = officeAceStripPrefix(body)
+  const target = `${officeAceMaasBase(credential)}${OA_CHAT_PATH}`
+  const signal = init?.signal ?? req?.signal ?? AbortSignal.timeout(OA_TOKEN_TIMEOUT_MS)
+
+  const call = (cred) =>
+    fetcher(target, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: basicAuthorization(cred) },
+      body,
+      signal,
+    })
+
+  const response = await call(credential)
+  if (response.ok) return response
+
+  const text = await response.text().catch(() => "")
+  let status = response.status
+  let said = text
+  let renewal = "not-attempted"
+  if (renew && (status === 401 || isOfficeAceBasicRejection(status, said))) {
+    const before = oaBasicFingerprint(credential)
+    let renewed
+    try {
+      renewed = await renew()
+    } catch {
+      renewed = undefined
+    }
+    if (!renewed) renewal = "unreadable"
+    else if (oaBasicFingerprint(renewed) !== before) {
+      renewal = "changed"
+      const retry = await call(renewed)
+      if (retry.ok) return retry
+      status = retry.status
+      said = await retry.text().catch(() => "")
+    } else {
+      renewal = "unchanged"
+    }
+  }
+
+  return Response.json(
+    {
+      error: {
+        type: "provider_error",
+        message:
+          `OfficeAce（华为 MaaS）返回 HTTP ${status}：${said.slice(0, 200)}（${officeAceDiagnose(status, renewal)}）`,
+        provider_status: status,
+        credential_rejected: isOfficeAceBasicRejection(status, said),
+        renewal_outcome: renewal,
+      },
+    },
+    { status: status >= 400 ? status : 502 },
+  )
+}
+
+/** One sentence a person can act on. */
+function officeAceDiagnose(status, renewal) {
+  if (status === 401 || status === 403) {
+    if (renewal === "changed") return "续期后仍然是 401，请重新登录"
+    if (renewal === "unchanged") return "凭据没变，重试无意义，请重新登录"
+    if (renewal === "unreadable") return "续期失败，请重新登录"
+    return "凭据被拒，请重新登录"
+  }
+  if (status === 404) return "模型名不对，或该模型不在这个账号的套餐里"
+  if (status === 429) return "被限流，稍后重试或换账号"
+  if (status >= 500) return "上游服务错误"
+  return "请求被拒"
+}
+
+// ---- the two records of one account --------------------------------------
+//
+// magpie keeps accounts per provider id, and a provider's hooks only ever see
+// that provider's own account — there is no call to read another provider's
+// record. So the two records of one Huawei Cloud account are written the one
+// way the host offers: `client.auth.set` from inside a sign-in or a renewal.
+//
+// What is remembered here is in this module, shared by the package's two
+// plugins (one process, one module): which accounts each provider has, which
+// key this package wrote, and the last live credential of each account. A
+// record is never written to a key another account may sit at, and a record
+// that already holds the account is never written again.
+
+/** `${provider}\n${identity}` → the key this package wrote there. */
+const sharedAccountKeys = new Map()
+/** provider id → the identities its accounts were seen as. */
+const seenProviderAccounts = new Map()
+/** identity → { at, token, cred }: the newest credential this process has. */
+const liveAccounts = new Map()
+/** identity → { from, promise }: the renewal in flight. */
+const renewalGates = new Map()
+
+/** A stable 8-hex suffix of the account's identity — a key no other account gets. */
+function accountKeySuffix(identity) {
+  return createHash("sha256").update(String(identity)).digest("hex").slice(0, 8)
+}
+
+function rememberLiveAccount(cred) {
+  const identity = accountIdentityOf(cred).id || cred.account_id || cred.access_key_id
+  if (!identity) return
+  liveAccounts.set(identity, { at: Date.now(), token: firstOf(cred.refresh_token), cred })
+}
+
+function noteProviderAccount(provider, identity) {
+  if (!provider || !identity) return
+  const set = seenProviderAccounts.get(provider) ?? new Set()
+  set.add(identity)
+  seenProviderAccounts.set(provider, set)
+}
+
+/** The provider was listed with no account at all: it has none, as far as this process knows. */
+function noteProviderEmpty(provider) {
+  if (!seenProviderAccounts.has(provider)) seenProviderAccounts.set(provider, new Set())
+}
+
+/**
+ * Where a record for `identity` may be written under `provider`: the provider's
+ * own key while it has no account at all, otherwise a key of its identity's
+ * own that no account can be sitting at. `null` when that provider already has
+ * this account (writing again would add a second record of one account).
+ */
+function recordKeyFor(provider, identity) {
+  const known = seenProviderAccounts.get(provider)
+  if (known?.has(identity)) return null
+  if (known && known.size === 0) return provider
+  return `${provider}#${accountKeySuffix(identity)}`
+}
+
+/** Give the credential the MaaS fields OfficeAce needs (one read per account). */
+async function withOfficeAceMaas(cred, fetcher = fetch) {
+  if (cred.model_app_key) return cred
+  const info = await officeAceMaasInfo(cred, fetcher).catch(() => null)
+  // An answer without a pair means "MaaS is not opened for this account": it is
+  // not a reason to take a pair the credential already has away.
+  if (!info?.model_app_key) return cred
+  return { ...cred, ...info }
+}
+
+/**
+ * Write one account's record under `target`, in that provider's own shape.
+ * Used at a sign-in (so the second provider gets the account the user just
+ * signed in with) and, for this provider's own record, so the key it lands at
+ * is one a later renewal can find again.
+ */
+async function writeSharedRecord(client, target, cred, fetcher = fetch) {
+  const identity = accountIdentityOf(cred).id
+  if (!identity || !client?.auth?.set) return null
+  const key = recordKeyFor(target, identity)
+  if (!key) return null
+  const body = target === OFFICEACE_PROVIDER
+    ? officeAceRecordBody(await withOfficeAceMaas(cred, fetcher))
+    : codeArtsRecordBody(cred)
+  try {
+    await client.auth.set({ path: { id: key }, body })
+  } catch {
+    return null
+  }
+  sharedAccountKeys.set(`${target}\n${identity}`, key)
+  noteProviderAccount(target, identity)
+  rememberLiveAccount(cred)
+  return { key, body }
+}
+
+/** Hand a renewed credential to the other record of the same account, if ours. */
+async function pushSharedRecord(client, target, cred, fetcher = fetch) {
+  const identity = accountIdentityOf(cred).id
+  if (!identity || !client?.auth?.set) return
+  const key = sharedAccountKeys.get(`${target}\n${identity}`)
+  if (!key) return
+  const body = target === OFFICEACE_PROVIDER
+    ? officeAceRecordBody(await withOfficeAceMaas(cred, fetcher))
+    : codeArtsRecordBody(cred)
+  try {
+    await client.auth.set({ path: { id: key }, body })
+  } catch {
+    /* best effort: the other record renews on its own */
+  }
+}
+
+/**
+ * Renew one Huawei Cloud credential, once, whoever asks for it.
+ *
+ * Both providers of an account read the same refresh chain: STS spends a
+ * refresh token once, so a second use of it would turn the account away. The
+ * second caller here gets the first's answer (in this process), and a caller
+ * that meets an already-spent token takes whatever this process renewed a
+ * moment ago instead of failing.
+ */
+function renewSharedCredential(cred, run) {
+  const identity = accountIdentityOf(cred).id || cred.account_id || cred.access_key_id
+  const token = firstOf(cred.refresh_token)
+  const held = renewalGates.get(identity)
+  if (held && held.from === token) return held.promise
+  const live = liveAccounts.get(identity)
+  if (live?.token && token && live.token !== token && Date.now() - live.at < 10 * 60 * 1000) {
+    return Promise.resolve(live.cred)
+  }
+  const promise = Promise.resolve()
+    .then(run)
+    .then((next) => {
+      // A rotation rebuilds only the STS half of a credential: what the account
+      // carries besides it (its MaaS pair, its phone, its session) stays.
+      for (const k of ["model_app_key", "model_app_secret", "maas_base_url", "user_phone", "domain_id", "oauth_client"]) {
+        if (cred[k] && !next[k]) next[k] = cred[k]
+      }
+      rememberLiveAccount(next)
+      return next
+    })
+    .catch((e) => {
+      const again = liveAccounts.get(identity)
+      if (again?.token && token && again.token !== token) return again.cred
+      throw e
+    })
+    .finally(() => {
+      if (renewalGates.get(identity)?.promise === promise) renewalGates.delete(identity)
+    })
+  renewalGates.set(identity, { from: token, promise })
+  return promise
+}
+
+/**
+ * Renew a credential through the OAuth client that issued its refresh token:
+ * this package's CodeArts flow (verifier + DPoP key, no client change), or the
+ * old OfficeAce flow (`pdp5_for_agentarts`, DPoP key only).
+ */
+async function renewOfficeAceCredential(cred, fetcher = fetch) {
+  if (!cred.refresh_token) {
+    throw Object.assign(new Error("OfficeAce 凭据无法续期（没有 refresh token），请重新登录"), { signIn: "expired" })
+  }
+  if (!cred.dpop_private_key_jwk) {
+    throw Object.assign(new Error("OfficeAce 凭据无法续期（DPoP 私钥缺失），请重新登录"), { signIn: "expired" })
+  }
+  const keyPair = keyPairFromStoredJwk(cred.dpop_private_key_jwk)
+  const token = isCodeArtsClient(cred)
+    ? await requestToken({
+        client_id: CLIENT_ID,
+        code_verifier: firstOf(cred.code_verifier),
+        grant_type: GRANT_REFRESH_TOKEN,
+        refresh_token: cred.refresh_token,
+      }, keyPair, fetcher)
+    : await requestToken({
+        client_id: OA_AGENTARTS_CLIENT_ID,
+        grant_type: GRANT_REFRESH_TOKEN,
+        refresh_token: cred.refresh_token,
+      }, keyPair, fetcher)
+  const next = credentialFromTokenResponse(token, firstOf(cred.code_verifier), keyPair)
+  // What a rotation does not rebuild: the account's one upstream session, its
+  // identity, its phone and the MaaS credentials behind the preserved appKey.
+  for (const k of ["session_id", "domain_id", "user_phone", "model_app_key", "model_app_secret", "maas_base_url", "oauth_client"]) {
+    if (cred[k]) next[k] = cred[k]
+  }
+  if (!next.refresh_token) next.refresh_token = cred.refresh_token
+  if (!next.oauth_client) next.oauth_client = isCodeArtsClient(cred) ? "codearts-agent" : OA_AGENTARTS_CLIENT_ID
+  // The MaaS Basic pair is minted per permission check and can rotate with the
+  // session: read it again when this account has one. Best effort — the stored
+  // pair stands when the CLAW call is down.
+  if (cred.model_app_key) {
+    const info = await fetchOfficeAceMaasInfo(next, fetcher).catch(() => null)
+    if (info?.model_app_key) {
+      Object.assign(next, info)
+      oaMaasCache.set(accountIdentityOf(next).id || next.access_key_id, { at: Date.now(), info })
+    }
+  }
+  return next
+}
+
+/**
+ * Carry a CodeArts account into OfficeAce without a second sign-in.
+ *
+ * Called when the OfficeAce card is listed with no account of its own — which
+ * the hooks can tell (a models hook that runs with no `auth` is a provider with
+ * no accounts). The account comes from the credential this process last saw
+ * for the CodeArts provider: the same Huawei Cloud account, one sign-in.
+ * Nothing is written when the account's OfficeAce side can't even be checked
+ * (the CLAW call is down), so a later listing tries again instead of leaving a
+ * record that can't work.
+ */
+async function adoptCodeArtsAccount(client, fetcher = fetch) {
+  if (!client?.auth?.set) return null
+  const known = seenProviderAccounts.get(OFFICEACE_PROVIDER)
+  if (known && known.size > 0) return null
+  const candidates = [...liveAccounts.entries()]
+    .filter(([, live]) => !!live.cred?.access_key_id)
+    .sort((a, b) => b[1].at - a[1].at)
+  for (const [identity, live] of candidates) {
+    if (seenProviderAccounts.get(OFFICEACE_PROVIDER)?.has(identity)) continue
+    const info = await officeAceMaasInfo(live.cred, fetcher).catch(() => null)
+    if (!info) continue
+    const adopted = { ...live.cred, ...info }
+    const written = await writeSharedRecord(client, OFFICEACE_PROVIDER, adopted, fetcher)
+    if (written) return adopted
+  }
+  return null
+}
+
+/** Is this credential close enough to its expiry to renew first? */
+function nearOfficeAceExpiry(cred) {
+  const at = Date.parse(firstOf(cred?.expires_at))
+  return Number.isFinite(at) && at - Date.now() <= OA_REFRESH_LEAD_MS
+}
+
+/** Store an OfficeAce record for the account this hook runs for (its own scope's key). */
+async function persistOfficeAceRecord(client, cred) {
+  const body = officeAceRecordBody(cred)
+  try {
+    await client?.auth?.set?.({ path: { id: OFFICEACE_PROVIDER }, body })
+  } catch {
+    /* best effort: the next renewal writes it again */
+  }
+  return body
+}
+
+/**
+ * OfficeAce — the second provider of this package, served from the same
+ * Huawei Cloud sign-in as `codearts`.
+ *
+ * Provider id `officeace`: the id `officeace-auth` used, so the accounts signed
+ * in through that package are read from where magpie already keeps them
+ * (`officeace`, `officeace#xxxxxx`) and nobody signs in again.
+ */
+export const OfficeAceAuthPlugin = async ({ client } = {}, options = {}) => {
+  const fetcher = typeof options?.fetch === "function" ? options.fetch : fetch
+  const log = (message, level = "info") => {
+    try {
+      client?.app?.log?.({ service: "officeace", level, message })
+    } catch {
+      /* no log channel */
+    }
+  }
+  /** This account's credential, as either shape declares it. */
+  const credential = (auth) => officeAceCredentialOf(auth)
+  const renewNow = (cred) => renewSharedCredential(cred, () => renewOfficeAceCredential(cred, fetcher))
+
+  return {
+    // The provider and the models it shows before anyone is signed in.
+    config: async (config) => {
+      config.provider ??= {}
+      config.provider[OFFICEACE_PROVIDER] ??= {}
+      const p = config.provider[OFFICEACE_PROVIDER]
+      p.name ??= "OfficeAce"
+      p.npm ??= OFFICEACE_NPM
+      p.api ??= `${OA_MAAS_MARKET_BASE}/v2`
+      p.models = { ...officeAceStaticModels(), ...(p.models ?? {}) }
+    },
+
+    // The account's own catalog: the billable list, minus the ids that always 404.
+    provider: {
+      id: OFFICEACE_PROVIDER,
+      async models(provider, { auth } = {}) {
+        let cred = credential(auth)
+        if (!cred) {
+          // No account of its own: one Huawei Cloud sign-in may already be here
+          // as the CodeArts provider's account, and it serves this one too.
+          noteProviderEmpty(OFFICEACE_PROVIDER)
+          const adopted = await adoptCodeArtsAccount(client, fetcher)
+          if (!adopted) return provider.models
+          log("从 CodeArts 的登录带入了同一个华为云账号")
+          cred = adopted
+        }
+        const identity = accountIdentityOf(cred).id
+        if (identity) noteProviderAccount(OFFICEACE_PROVIDER, identity)
+
+        if (!cred.model_app_key) {
+          const healed = await withOfficeAceMaas(cred, fetcher)
+          if (healed.model_app_key) cred = healed
+        }
+        // The catalog and chat are behind the MaaS appKey; without it the
+        // static table is all there is (and it is honest: nobody knows yet).
+        if (!cred.model_app_key) return provider.models
+
+        const base = officeAceMaasBase(cred)
+        try {
+          const rows = await fetchOfficeAceCatalog(cred, fetcher)
+          if (!rows.length) return provider.models
+          let rates = null
+          try {
+            rates = await fetchOfficeAceTokenRates(cred, fetcher)
+          } catch {
+            rates = null
+          }
+          // An empty rates table means "never read", not "no model is billable":
+          // fall back to the static table rather than the registry's 26 ids, 19
+          // of which the user can select and then only fail at chat.
+          if (!rates || rates.size === 0) {
+            log("倍率表不可用（空表）—— 目录降级为静态表，不列出注册表占位 id", "warn")
+            return provider.models
+          }
+          const live = officeAceLiveModels(rows, base, rates)
+          if (Object.keys(live).length === 0) {
+            log("倍率表与模型目录零交集 —— 退回静态表", "warn")
+            return provider.models
+          }
+          return live
+        } catch (e) {
+          log(`目录拉取失败，回退静态表：${e?.message ?? e}`, "warn")
+          if (/401|403|unauthorized|被拒/i.test(String(e?.message))) {
+            throw Object.assign(new Error("OfficeAce 登录已失效，请重新登录"), { signIn: "expired" })
+          }
+          return provider.models
+        }
+      },
+    },
+
+    auth: {
+      provider: OFFICEACE_PROVIDER,
+      icon: OFFICEACE_ICON,
+      maxConcurrency: 3,
+      refreshLead: OA_REFRESH_LEAD_MS,
+
+      methods: [
+        {
+          type: "oauth",
+          label: "Sign in with Huawei Cloud",
+          /**
+           * The same Huawei Cloud sign-in as the CodeArts card, because it is
+           * literally the same credential: the STS triple it yields signs both
+           * vendors' APIs (measured). One sign-in, both providers.
+           *
+           * `authorize()` returns at once; the waiting happens in `callback()`.
+           */
+          async authorize() {
+            const flow = await startOAuthFlow(fetcher)
+            return {
+              url: flow.loginUrl,
+              instructions:
+                "Sign in to Huawei Cloud in the browser. This one sign-in serves both OfficeAce and CodeArts; this window closes itself when done.",
+              method: "auto",
+              async callback() {
+                try {
+                  const outcome = await flow.result
+                  const cred = safeJson(outcome.access)
+                  if (!cred?.access_key_id) {
+                    return { type: "failed", error: "Huawei Cloud did not return a credential" }
+                  }
+                  // The card's name (its phone), and OfficeAce's MaaS credentials.
+                  const identified = { ...cred, ...(await accountPhoneField(cred, fetcher)) }
+                  const withMaas = await withOfficeAceMaas(identified, fetcher)
+                  // One sign-in, two providers: the CodeArts card takes the same
+                  // account, and this card's record lands where a renewal can
+                  // find it again.
+                  await writeSharedRecord(client, PROVIDER, withMaas, fetcher)
+                  await writeSharedRecord(client, OFFICEACE_PROVIDER, withMaas, fetcher)
+                  return { ...officeAceRecordBody(withMaas), type: "success" }
+                } catch (e) {
+                  return { type: "failed", error: e?.message ?? String(e) }
+                } finally {
+                  await flow.close()
+                }
+              },
+            }
+          },
+        },
+      ],
+
+      /** Renew this account's credential; the CodeArts record of it follows. */
+      async refresh(auth) {
+        const cred = credential(auth)
+        if (!cred) return undefined
+        const next = await renewNow(cred)
+        if (!next) return undefined
+        const body = officeAceRecordBody(next)
+        await pushSharedRecord(client, PROVIDER, next, fetcher)
+        return {
+          access: body.access,
+          refresh: body.refresh,
+          expires: body.expires,
+          ...(body.accountId ? { accountId: body.accountId } : {}),
+          ...(body.uid ? { uid: body.uid } : {}),
+        }
+      },
+
+      /** Rewrite Bearer to Basic, strip the provider prefix, renew once on a 401. */
+      async loader(getAuth) {
+        let cred = credential(await getAuth())
+        if (!cred) return {}
+        rememberLiveAccount(cred)
+        const identity = accountIdentityOf(cred).id
+        if (identity) noteProviderAccount(OFFICEACE_PROVIDER, identity)
+
+        if (!cred.model_app_key) {
+          const healed = await withOfficeAceMaas(cred, fetcher)
+          if (healed.model_app_key) {
+            cred = healed
+            await persistOfficeAceRecord(client, cred)
+          }
+        }
+        // Signed in, but MaaS was never opened for this account: say so instead
+        // of sending an empty Basic header upstream (a 400 that reads like a
+        // broken model). Usage and the check-in work off the STS triple alone.
+        if (!cred.model_app_key) {
+          return {
+            async fetch() {
+              return Response.json(
+                {
+                  error: {
+                    message:
+                      "OfficeAce 账号已登录，但还没有接入华为云 MaaS（凭据里没有 modelAppKey）。" +
+                      "请在 OfficeAce 客户端完成「接入华为云 MaaS 模型」后重试；额度与签到不受影响，已经可以正常使用。",
+                    type: "officeace_maas_not_linked",
+                    code: "MaaSNotLinked",
+                  },
+                },
+                { status: 400, headers: { "content-type": "application/json" } },
+              )
+            },
+          }
+        }
+
+        return {
+          // Empty: the URL is built from the credential's own MaaS base.
+          baseURL: "",
+          apiKey: "",
+          async fetch(input, init) {
+            const fresh = credential(await getAuth().catch(() => null)) ?? cred
+            return officeAceChatFetch({
+              input,
+              init,
+              credential: fresh,
+              fetcher,
+              renew: async () => {
+                try {
+                  const next = await renewNow(fresh)
+                  if (next) {
+                    await persistOfficeAceRecord(client, next)
+                    await pushSharedRecord(client, PROVIDER, next, fetcher)
+                  }
+                  return next
+                } catch (e) {
+                  log(`续期失败：${e?.message ?? e}`, "warn")
+                  return undefined
+                }
+              },
+            })
+          },
+        }
+      },
+
+      /** The subscription's buckets: plan quotas and activity bonuses. */
+      async usage(getAuth) {
+        const cred = credential(await getAuth())
+        if (!cred) return { error: "未登录", windows: [] }
+        rememberLiveAccount(cred)
+        try {
+          const u = await fetchOfficeAceUsage(cred, fetcher)
+          const user = firstOf(cred.user_phone, officeAceIdentityOf(cred).accountId)
+          return {
+            plan: u.plan || "OfficeAce",
+            ...(user ? { user } : {}),
+            windows: u.windows,
+          }
+        } catch (e) {
+          return { error: String(e?.message ?? e).slice(0, 300), windows: [] }
+        }
+      },
+
+      /** The daily claim; claiming twice is idempotent (a 2xx with no skus is `done`). */
+      async checkin(getAuth) {
+        const cred = credential(await getAuth())
+        if (!cred) return { outcome: "failed", message: "未登录" }
+        try {
+          let use = cred
+          if (nearOfficeAceExpiry(cred) && cred.refresh_token) {
+            try {
+              use = (await renewNow(cred)) ?? cred
+              if (use !== cred) await persistOfficeAceRecord(client, use)
+            } catch {
+              /* try with what is stored */
+            }
+          }
+          const result = await officeAceCheckin(use, fetcher)
+          if (result.outcome === "claimed") log(`签到：${result.message ?? "已领取"}`)
+          return result
+        } catch (e) {
+          return { outcome: "failed", message: String(e?.message ?? e).slice(0, 300) }
+        }
+      },
+    },
+
+    /** Per-request header: the same conversation keeps one upstream session. */
+    "chat.headers": async (input, output) => {
+      const id = input?.model?.providerID ?? input?.provider?.info?.id
+      if (id !== OFFICEACE_PROVIDER || !input?.sessionID) return
+      output.headers["x-officeace-session"] = String(input.sessionID).slice(0, 128)
+    },
+  }
+}
+
+// for tests (never a plugin: magpie only calls exported functions)
+export const _officeace = {
+  OFFICEACE_PROVIDER, OA_FALLBACK_MODELS, OA_UNAVAILABLE_IDS, OA_MAAS_MARKET_BASE,
+  OA_SUBSCRIPTION_BASE, OA_CLAW_BASE, OA_PERMISSION_PATH, OA_TOKEN_RATES_PATH,
+  officeAceCredentialOf, officeAceCredentialRecord, officeAceRecordBody, codeArtsRecordBody,
+  officeAceIdentityOf, officeAceMaasBase, officeAceModelEntry, officeAceStaticModels,
+  officeAceLiveModels, fetchOfficeAceUsage, officeAceCheckin, officeAceStripPrefix,
+  officeAceChatFetch, officeAceDiagnose, isOfficeAceBasicRejection, oaBasicFingerprint,
+  fetchOfficeAceTokenRates, fetchOfficeAceCatalog, fetchOfficeAceMaasInfo, officeAceMaasInfo,
+  signOfficeAceV11, oaSdkDate, officeAceSigned, basicAuthorization, isCodeArtsClient,
+  renewOfficeAceCredential, renewSharedCredential, nearOfficeAceExpiry,
+  accountKeySuffix, recordKeyFor, writeSharedRecord, pushSharedRecord, adoptCodeArtsAccount,
+  noteProviderAccount, noteProviderEmpty, rememberLiveAccount, seenProviderAccounts,
+  liveAccounts, sharedAccountKeys, renewalGates, withOfficeAceMaas, persistOfficeAceRecord,
+  OFFICEACE_ICON,
+}
+
+
