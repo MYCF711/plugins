@@ -26,6 +26,7 @@ export function fakeLoomy() {
     smsSent: null, // {phone, msgid}
     logins: 0,
     chatCalls: [],
+    chatRefusal: null, // set to an upstream message to answer 400 instead
     firstLoginCalls: 0,
     dailyBalance: 3000, // the day's first first-login refreshes it to 5000
     recordsReads: 0,
@@ -38,6 +39,7 @@ export function fakeLoomy() {
       state.smsSent = null
       state.logins = 0
       state.chatCalls = []
+      state.chatRefusal = null
       state.firstLoginCalls = 0
       state.dailyBalance = 3000
       state.recordsReads = 0
@@ -119,6 +121,7 @@ export function fakeLoomy() {
         if (!/charset\s*=\s*"?utf-8/i.test(ct)) return json(400, { code: "100009", desc: "content-type must name utf-8" })
         const body = await req.json().catch(() => ({}))
         state.chatCalls.push({ body })
+        if (state.chatRefusal) return json(400, { error: { message: state.chatRefusal, type: "invalid_request_error" } })
         const reply = body.stream
           ? new Response(
               [

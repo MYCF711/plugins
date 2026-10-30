@@ -78,6 +78,20 @@ describe("chat", () => {
     expect(fake.state.chatCalls[0].body.model).toBe("spark-x")
   })
 
+  test("a genuinely over-length Kimi-k2.6 request still comes back 400", async () => {
+    // 150 万 ASCII 字符 ≈ 37.5 万 token，对 262,144 窗口的 Kimi-k2.6 是真超长。
+    // 旧实现按固定 200 万字符阈值判成「上游瞬时故障」并改成 502，magpie 会换号重试到整轮失败。
+    fake.state.chatRefusal = "内容太长了，请精简输入或开启新对话"
+    const loader = await plugin.auth.loader(getAuth)
+    const huge = "word ".repeat(300_000)
+    const res = await loader.fetch(`${fake.gatewayUrl}/api/v1/chat/completions`, {
+      method: "POST",
+      body: JSON.stringify({ model: "kimi-k2.6", stream: false, messages: [{ role: "user", content: huge }] }),
+    })
+    expect(res.status).toBe(400)
+    expect(await res.text()).toContain("上下文超出长度限制")
+  })
+
   test("reasoning effort folds to low/medium/high", async () => {
     const loader = await plugin.auth.loader(getAuth)
     await loader.fetch(`${fake.gatewayUrl}/api/v1/chat/completions`, {
@@ -307,52 +321,39 @@ describe("a 400 that says the content is too long", () => {
   // magpie `internal/gateway/gateway.go` 的 tooLongRe 中文两条 —— 逐字抄，改这里等于改契约
   const tooLongRe = /上下文(长度)?(超|过长)|超(过|出)(了)?(模型)?(的)?(最大)?上下文/
   const vendor = "内容太长了，请精简输入或开启新对话"
-  const asJson = (status, message) =>
-    new Response(JSON.stringify({ error: { message } }), { status, headers: { "content-type": "application/json" } })
 
-  test("请求体远小于窗口 → 502，让 magpie 换号", async () => {
-    const out = _internal.retryableRefusal(400, JSON.stringify({ error: { message: vendor } }), 150_000)
+  test("改写成 tooLongRe 认得的说法，状态码保持 400", async () => {
+    const out = _internal.retryableRefusal(400, JSON.stringify({ error: { message: vendor } }))
     expect(out).not.toBeNull()
-    expect(out.status).toBe(502)
-    expect(out.headers.get("x-loomy-classified")).toBe("momentary")
-    expect(await out.text()).toContain("内容太长") // 保留上游原话，排障用
-  })
-
-  test("请求体确实大 → 保持 400，并把文案换成 tooLongRe 认得的说法", async () => {
-    const out = _internal.retryableRefusal(400, JSON.stringify({ error: { message: vendor } }), 3_000_000)
     expect(out.status).toBe(400)
     const body = await out.text()
     expect(body).toMatch(tooLongRe)
     expect(body).not.toContain("内容太长")
   })
 
-  test("边界：恰好 200 万字符仍当长度问题", async () => {
-    const out = _internal.retryableRefusal(400, JSON.stringify({ error: { message: vendor } }), 2_000_000)
-    expect(out.status).toBe(400)
-    expect(await out.text()).toMatch(tooLongRe)
-  })
-
-  test("413 与 422 同办", async () => {
+  test("413 与 422 同办，状态码不变", async () => {
     for (const status of [413, 422]) {
-      const small = _internal.retryableRefusal(status, vendor, 100_000)
-      expect(small.status).toBe(502)
-      const big = _internal.retryableRefusal(status, vendor, 3_000_000)
-      expect(big.status).toBe(status)
+      const out = _internal.retryableRefusal(status, vendor)
+      expect(out.status).toBe(status)
+      expect(await out.text()).toMatch(tooLongRe)
     }
   })
 
+  test("超大请求体仍是 400——不能因为大小改判成上游故障", async () => {
+    // 150 万 ASCII 字符 ≈ 37.5 万 token，对 Kimi-k2.6（262,144）已经是真超长；
+    // 旧实现按固定字符阈值在这里返回 502，magpie 会换号重试到整轮失败。
+    const huge = "word ".repeat(300_000)
+    const out = _internal.retryableRefusal(400, JSON.stringify({ error: { message: vendor, echo: huge.slice(0, 30) } }))
+    expect(out.status).toBe(400)
+  })
+
   test("别的 400 不碰", () => {
-    expect(_internal.retryableRefusal(400, JSON.stringify({ error: { message: "invalid api key" } }), 1000)).toBeNull()
+    expect(_internal.retryableRefusal(400, JSON.stringify({ error: { message: "invalid api key" } }))).toBeNull()
   })
 
   test("不是 400/413/422 的不碰（2xx 是 SSE 干流）", () => {
-    expect(_internal.retryableRefusal(200, vendor, 1000)).toBeNull()
-    expect(_internal.retryableRefusal(429, vendor, 1000)).toBeNull()
-    expect(_internal.retryableRefusal(500, vendor, 1000)).toBeNull()
-  })
-
-  test("errorResponse 形状不受影响（对照，确保上面用的 helper 是同一个）", () => {
-    const r = asJson(400, vendor)
-    expect(r.status).toBe(400)
+    expect(_internal.retryableRefusal(200, vendor)).toBeNull()
+    expect(_internal.retryableRefusal(429, vendor)).toBeNull()
+    expect(_internal.retryableRefusal(500, vendor)).toBeNull()
   })
 })

@@ -98,22 +98,20 @@ const errorResponse = (status, message) =>
  *
  * Measured 2026-10-30: an 838,400-token request succeeded while a 373,924-token
  * one was refused this way, and the same window carried `429 模型服务当前繁忙`.
+ *
+ * ⚠ History: the 502 branch was removed on review. A fixed character threshold
+ * knows nothing about the model's own window (Kimi-k2.6 is 262,144 tokens, but
+ * 1.5M ASCII characters is already ~375k tokens), so it reported genuine
+ * over-length requests as upstream failures — magpie then retried every account
+ * and the turn ended in 502. This version only rewrites the wording; it never
+ * changes the status.
  */
 const TOO_LONG_SAID = /内容太长(了)?|内容过长/
 const TOO_LONG_REWORDED = "上下文超出长度限制"
-/** Below this many characters a request cannot be over a 1M-token window */
-const NOT_TOO_LONG_MAX_CHARS = 2_000_000
 
-function retryableRefusal(status, body, requestChars) {
+function retryableRefusal(status, body) {
   if (status !== 400 && status !== 413 && status !== 422) return null
   if (!TOO_LONG_SAID.test(body)) return null
-  const momentary = requestChars > 0 && requestChars < NOT_TOO_LONG_MAX_CHARS
-  if (momentary) {
-    return new Response(body, {
-      status: 502,
-      headers: { "content-type": "application/json", "x-loomy-classified": "momentary" },
-    })
-  }
   return new Response(body.replace(TOO_LONG_SAID, TOO_LONG_REWORDED), {
     status,
     headers: { "content-type": "application/json", "x-loomy-vendor-status": String(status) },
@@ -436,7 +434,7 @@ export async function LoomyAuthPlugin({ client } = {}) {
             if (res.status === 401 || res.status === 403) return errorResponse(401, "Loomy 登录态已失效，请重新登录")
             if (!res.ok) {
               const raw = await res.text().catch(() => "")
-              const refusal = retryableRefusal(res.status, raw, JSON.stringify(chat).length)
+              const refusal = retryableRefusal(res.status, raw)
               if (refusal) return refusal
               return errorResponse(res.status, `Loomy 上游返回 ${res.status}: ${raw.slice(0, 4096) || "无错误说明"}`)
             }
