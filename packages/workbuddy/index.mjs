@@ -1008,6 +1008,52 @@ function systemAsUserOn(b) {
   return true
 }
 
+// OPENERS are the shapes in which an agent's opening says which harness it
+// runs in, as a vendor may have fingerprinted one. A vendor matches a refused
+// line whole and exactly — one extra space passes it, as FLAGGED's note above
+// has it — so the same line with one more comma passes while still saying
+// what it said. Measured 2026-10-30 against copilot.tencent.com, one account,
+// streamed, deepseek-v4.1-flash at max: DeepSeek Harness's opener answered
+// 400 code 11128 as written, and 200 with the comma, the harness's name still
+// in it; a suffix in its place (…Harness Desktop., …Harness CLI.) changed
+// nothing, so it is the line's shape the vendor knows, not the product alone.
+const OPENERS = [
+  [/(\bYou are (?:an?|the)\s[^\n.,]{0,60}?\b(?:agent|assistant))\s+(powered by|running on|running in|built on|based on)\b/gi, "$1, $2"],
+]
+
+function opened(text) {
+  for (const [re, to] of OPENERS) text = text.replace(re, to)
+  return text
+}
+
+// commaPaused is body with OPENERS' comma set in every message, the system
+// messages among them: a refused chat's words are the system prompt's most
+// often. It is tried before systemAsUser, which takes the system prompt out
+// of the slot an agent's instructions are read in. null when there was
+// nothing to set a comma in.
+function commaPaused(body) {
+  const b = chatOf(body)
+  if (!Array.isArray(b?.messages)) return null
+  let changed = false
+  for (const m of b.messages) {
+    if (typeof m?.content === "string") {
+      const t = opened(m.content)
+      if (t === m.content) continue
+      m.content = t
+      changed = true
+    } else if (Array.isArray(m.content)) {
+      for (const p of m.content) {
+        if (typeof p?.text !== "string") continue
+        const t = opened(p.text)
+        if (t === p.text) continue
+        p.text = t
+        changed = true
+      }
+    }
+  }
+  return changed ? JSON.stringify(b) : null
+}
+
 // normalizeToolChoice converts the object form emitted by OpenAI clients to
 // WorkBuddy's string form. It runs after fitted(), so a named choice follows a
 // tool name that was made safe for WorkBuddy.
@@ -3317,7 +3363,16 @@ function makePlugin(site) {
               else res = new Response(text, { status: res.status, statusText: res.statusText, headers: res.headers })
             }
             if (res.status === 400 && !native) {              let text = await res.text()
-              const moved = REFUSED.test(text) && sysKey && !refusedSystems.has(sysKey) ? systemAsUser(body) : null
+              // the vendor may know a shape of the agent's opening that FLAGGED
+              // doesn't: the same words said with one more comma pass it, and
+              // that is tried before the system prompt is moved out of its slot
+              const paused = REFUSED.test(text) ? commaPaused(body) : null
+              if (paused) {
+                body = paused
+                res = await send(shaped(body))
+                if (res.status === 400) text = await res.text()
+              }
+              const moved = res.status === 400 && REFUSED.test(text) && sysKey && !refusedSystems.has(sysKey) ? systemAsUser(body) : null
               if (moved) {
                 refusedSystems.add(sysKey)
                 if (refusedSystems.size > 256) refusedSystems.delete(refusedSystems.values().next().value)
@@ -3446,6 +3501,13 @@ function makePlugin(site) {
 // apart from WorkBuddy's own words.
 const REFUSED_HINT =
   "WorkBuddy refused words in this client's prompt (most often its system prompt); use it from Hermes, OpenCode or Pi, or add another provider to this group"
+
+// REFUSED_DOC is where a refusal's fix is written down, for whoever holds the
+// error next: the person reading it, or the agent they paste it to. It goes
+// before the hint, never after, because magpie's Routing page tells the hint
+// from WorkBuddy's own words by the error ending in it.
+const REFUSED_DOC = "https://github.com/magpie-community/plugins/blob/main/packages/workbuddy/REFUSED.md"
+
 const REFUSED = /unapproved channel|illegal api invocation/i
 
 // BAD_SIGNATURE is WorkBuddy's refusal of a thinking block whose signature it
@@ -3524,7 +3586,11 @@ async function explained(res) {
   const hint = isRefused ? REFUSED_HINT : isRestricted ? RESTRICTED_HINT : EXHAUSTED_HINT
   const type = isRefused || isRestricted ? "permission_error" : "insufficient_quota"
   const errCode = isRefused ? null : isRestricted ? RESTRICTED_CODE : 14018
-  msg = `${msg} — ${hint}`
+  // a refusal says where its fix is written down, so whoever holds the error
+  // — the person, or the agent they paste it to — can go and read it. It goes
+  // before the hint, never after: the hint is the message's end.
+  const where = isRefused ? `${REFUSED_DOC} — ` : ""
+  msg = `${msg} — ${where}${hint}`
   const headers = new Headers(res.headers)
   headers.set("content-type", "application/json")
   headers.delete("content-length")
@@ -3537,4 +3603,4 @@ export const WorkBuddyAuthPlugin = makePlugin(SITES.workbuddy)
 export const WorkBuddyAIAuthPlugin = makePlugin(SITES["workbuddy-ai"])
 
 // for tests
-export const _internal = { idFor, replyAfterToolsOn, withDefaultEffort, defaultEffortOf, gzipped, FREE_ONLY, PRICE_TTL, keyAccount, remoteConfig, cycleOf, typeUnions, systemAsUser, systemKey, DEFAULT_SYSTEM, EDGE_READS, fitShape, replyAfterTools, AFTER_TOOLS_REFUSED, enterpriseUsageOf, accountName, notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, asReasoning, normalizeToolChoice, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, freeCredits, creditsOf, priceOf, fresh, SITES, renewing, renewed, SESSION, attend, scopeOf, turnKey, conversationKey, signatureOf, isMessages, withoutUnsigned, withoutSignedThinking, prepared, answeredBefore, nativeOf, modelOf, configModels, freeWindowOf, tokensShort, freeWindowRows, freeWindowLedger, readLedgerTail, pinned, rowTime, rowAccount, ofAccount, windowOffset, windowReset, FREE_WINDOW_MODELS, FREE_WINDOW_SPAN, FREE_WINDOW_GAP, FREE_WINDOW_LEAD, checkinOf, API_MESSAGES: NPM_MESSAGES, API_CHAT: NPM }
+export const _internal = { idFor, replyAfterToolsOn, withDefaultEffort, defaultEffortOf, gzipped, FREE_ONLY, PRICE_TTL, keyAccount, remoteConfig, cycleOf, typeUnions, systemAsUser, systemKey, DEFAULT_SYSTEM, EDGE_READS, fitShape, replyAfterTools, AFTER_TOOLS_REFUSED, enterpriseUsageOf, accountName, notDesktop, textOnly, runsOutOf, packagesOf, endOf, enterpriseHeaders, enterpriseOf, liveModels, browserSignIn, withSystem, asReasoning, normalizeToolChoice, fitTools, fitted, renamed, unflagged, usageOf, desktopHeld, explained, REFUSED_HINT, RESTRICTED_HINT, EXHAUSTED_HINT, REFUSED_DOC, commaPaused, opened, freeCredits, creditsOf, priceOf, fresh, SITES, renewing, renewed, SESSION, attend, scopeOf, turnKey, conversationKey, signatureOf, isMessages, withoutUnsigned, withoutSignedThinking, prepared, answeredBefore, nativeOf, modelOf, configModels, freeWindowOf, tokensShort, freeWindowRows, freeWindowLedger, readLedgerTail, pinned, rowTime, rowAccount, ofAccount, windowOffset, windowReset, FREE_WINDOW_MODELS, FREE_WINDOW_SPAN, FREE_WINDOW_GAP, FREE_WINDOW_LEAD, checkinOf, API_MESSAGES: NPM_MESSAGES, API_CHAT: NPM }
