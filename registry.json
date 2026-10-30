@@ -132,6 +132,8 @@
       }
     },
     { "package": "magpie-aws-bedrock-sso", "name": "AWS Bedrock SSO", "providers": ["bedrock-sso"],
-      "summary": { "en": "Use Amazon Bedrock Claude and GPT models with your AWS CLI profile, including SSO / IAM Identity Center. SigV4 authentication; no Bedrock API key needed.", "zh": "使用 AWS CLI 配置（支持 SSO / IAM Identity Center）接入 Amazon Bedrock 的 Claude 和 GPT 模型，通过 SigV4 签名，无需 Bedrock API 密钥。" } }
+      "summary": { "en": "Use Amazon Bedrock Claude and GPT models with your AWS CLI profile, including SSO / IAM Identity Center. SigV4 authentication; no Bedrock API key needed.", "zh": "使用 AWS CLI 配置（支持 SSO / IAM Identity Center）接入 Amazon Bedrock 的 Claude 和 GPT 模型，通过 SigV4 签名，无需 Bedrock API 密钥。" } },
+    { "package": "magpie-trustoken-auth", "name": "Trustoken（AiPy）", "providers": ["trustoken"], "community": true,
+      "summary": { "en": "Unofficial: Trustoken (AiPy) phone-code sign-in, live models, 灵石 balance, daily check-in and daily tasks, rolling invite codes.", "zh": "非官方：Trustoken（AiPy）手机号验证码登录，实时模型目录、灵石余额、每日签到与每日任务、滚动邀请码。" } }
   ]
 }
