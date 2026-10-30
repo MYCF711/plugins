@@ -1977,53 +1977,6 @@ function writeLedger(file, all) {
   fs.renameSync(tmp, file)
 }
 
-// ---- the record keys this package wrote ------------------------------------
-//
-// A sign-in writes two records of one Huawei Cloud account from one credential:
-// the record of the provider signed in at, and the other provider's, at a key
-// this package chose (`<provider>#<hash of the identity>`). The two hold one
-// refresh token, and STS spends a refresh token once — so when one of them
-// renews, the other must be handed the new credential. They are also handed
-// over *after a restart*: magpie restarts on every update, and the in-memory
-// map is empty then, so the keys are kept in a small file next to the check-in
-// ledger. Losing the file only means the other record is not found and fails
-// its renewal with the spent token; it never makes two chains one.
-
-const RECORDS_KEEP = 200
-
-const defaultRecordsPath = () =>
-  process.env.MAGPIE_CODEARTS_RECORDS || path.join(os.homedir(), ".config", "magpie", "codearts-records.json")
-
-/** `provider\nidentity` → `{ key, at }`, best effort (an unreadable file is empty). */
-function readRecordKeys(file) {
-  if (!file) return {}
-  const raw = readLedger(file)
-  return raw && !Array.isArray(raw) ? raw : {}
-}
-
-/** Remember the key this package wrote for one account's record. */
-function rememberRecordKey(file, provider, identity, key) {
-  if (!file || !provider || !identity || !key) return
-  try {
-    const all = readRecordKeys(file)
-    all[`${provider}\n${identity}`] = { key, at: Date.now() }
-    const kept = Object.entries(all)
-      .sort((a, b) => (Number(b[1]?.at) || 0) - (Number(a[1]?.at) || 0))
-      .slice(0, RECORDS_KEEP)
-    writeLedger(file, Object.fromEntries(kept))
-  } catch {
-    /* best effort: the push simply has nothing to find after a restart */
-  }
-}
-
-/** The key this package wrote for `provider`'s record of `identity`, memory first, then the file. */
-function recordKeyOf(file, provider, identity) {
-  const held = sharedAccountKeys.get(`${provider}\n${identity}`)
-  if (held) return held
-  const stored = readRecordKeys(file)[`${provider}\n${identity}`]
-  return stored && typeof stored.key === "string" ? stored.key : ""
-}
-
 /** Keep one claim (one a Beijing day), dropping what lapsed long ago. */
 function recordGrant(file, account, grant) {
   try {
@@ -2491,9 +2444,6 @@ function usageFromStatistics(raw, benefitRaw, { batches, grants, benefitIds } = 
 
 export const CodeArtsAuthPlugin = async ({ client } = {}, options = {}) => {
   const fetcher = typeof options?.fetch === "function" ? options.fetch : fetch
-  // Where the keys of the sibling records this package wrote are remembered
-  // across restarts (one small JSON file, beside the check-in ledger by default).
-  const recordsPath = typeof options?.recordsPath === "string" && options.recordsPath ? options.recordsPath : defaultRecordsPath()
   // Tunables (magpie: `magpie plugin options <name> '{…}'`). `maxInflight` can
   // only lower the gate: above 3 the account would pass the vendor's cap.
   const maxInflight = Number.isInteger(options?.maxInflight) && options.maxInflight > 0
@@ -2541,10 +2491,6 @@ export const CodeArtsAuthPlugin = async ({ client } = {}, options = {}) => {
       const promise = renewSharedCredential(cred, () => refreshCredential(cred, fetcher))
         .then(async (next) => {
           state.renewed = { from: token, next }
-          // The OfficeAce record of this account is the same sign-in: hand it
-          // the renewed credential as well, so neither record is left with a
-          // refresh token the other has already spent.
-          await pushSharedRecord(client, OFFICEACE_PROVIDER, next, fetcher, recordsPath)
           return next
         })
         .finally(() => {
@@ -2611,7 +2557,7 @@ export const CodeArtsAuthPlugin = async ({ client } = {}, options = {}) => {
         const cred = credentialOf(auth)
         if (!cred?.access_key_id) {
           // A models hook that runs with no auth is a provider with no accounts.
-          noteProviderEmpty(PROVIDER, recordsPath)
+          noteProviderEmpty(PROVIDER)
           return provider.models
         }
         const identity = accountIdentityOf(cred).id
@@ -2850,11 +2796,11 @@ export const CodeArtsAuthPlugin = async ({ client } = {}, options = {}) => {
                     ...(identity.id ? { uid: identity.id } : {}),
                   }
                   // One Huawei Cloud sign-in serves both providers: the OfficeAce
-                  // card is given this same account (in its own record shape), and
-                  // this card's record is put at a key a renewal can find again,
-                  // so the two records of one account stay in step.
-                  await writeSharedRecord(client, OFFICEACE_PROVIDER, withMaas, fetcher, recordsPath)
-                  await writeSharedRecord(client, PROVIDER, withMaas, fetcher, recordsPath)
+                  // card is given this same account in its own record shape. The
+                  // two records then live on their own; a renewal writes only the
+                  // record it renews.
+                  await writeSharedRecord(client, OFFICEACE_PROVIDER, withMaas, fetcher)
+                  await writeSharedRecord(client, PROVIDER, withMaas, fetcher)
                   return record
                 } catch (e) {
                   return { type: "failed", error: e?.message ?? String(e) }
@@ -2958,11 +2904,11 @@ export const _internal = {
 //
 // The two records of one account *do* share one rotating refresh token — a
 // sign-in writes both from one credential, and STS spends a refresh token
-// once. So every renewal of either record is pushed to the other's record at
-// the key this package wrote for it (remembered on disk, because magpie
-// restarts on every update and an in-memory map would be empty by then). A
-// record whose token was spent elsewhere fails its renewal and asks for the
-// sign-in again; it is never handed a credential from a different chain.
+// once. A renewal writes only the record being renewed; the other record's
+// next renewal is refused and asks for the sign-in again. Nothing is ever
+// written into another record, which is what kept resurrecting an account the
+// user had removed. A failed renewal never borrows a credential from another
+// chain.
 
 /** The OfficeAce provider id — the one the `officeace-auth` package used. */
 const OFFICEACE_PROVIDER = "officeace"
@@ -3647,8 +3593,6 @@ function officeAceDiagnose(status, renewal) {
 // record issued to `codearts-agent` — and those are two chains: each is only
 // ever renewed with its own token, and a failed renewal fails.
 
-/** `${provider}\n${identity}` → the key this package wrote there. */
-const sharedAccountKeys = new Map()
 /** provider id → the identities its accounts were seen as. */
 const seenProviderAccounts = new Map()
 /** refresh chain → { from, promise }: the renewal in flight. */
@@ -3729,36 +3673,10 @@ function noteProviderAccount(provider, identity) {
 }
 
 /** The provider was listed with no account at all: it has none, as far as this process knows. */
-function noteProviderEmpty(provider, recordsPath = "") {
+function noteProviderEmpty(provider) {
   // No accounts: any identity this process saw before is gone from the provider
-  // now, so the set is emptied (a stale identity must not authorise a push).
+  // now, so the set is emptied (a stale identity is not an account).
   seenProviderAccounts.set(provider, new Set())
-  // A provider with no accounts has none this package wrote either: forget the
-  // keys, or the next renewal of the other record would write a removed
-  // account back (the host's auth.set creates a record that isn't there).
-  forgetRecordKeys(recordsPath, provider)
-}
-
-/** Forget every key this package remembered for `provider`'s records. */
-function forgetRecordKeys(file, provider) {
-  const prefix = `${provider}\n`
-  for (const k of [...sharedAccountKeys.keys()]) {
-    if (k.startsWith(prefix)) sharedAccountKeys.delete(k)
-  }
-  if (!file) return
-  try {
-    const all = readRecordKeys(file)
-    let gone = false
-    for (const k of Object.keys(all)) {
-      if (k.startsWith(prefix)) {
-        delete all[k]
-        gone = true
-      }
-    }
-    if (gone) writeLedger(file, all)
-  } catch {
-    /* best effort: an unwritable file only means the key is forgotten next time */
-  }
 }
 
 /**
@@ -3790,7 +3708,7 @@ async function withOfficeAceMaas(cred, fetcher = fetch) {
  * signed in with) and, for this provider's own record, so the key it lands at
  * is one a later renewal can find again.
  */
-async function writeSharedRecord(client, target, cred, fetcher = fetch, recordsPath = "") {
+async function writeSharedRecord(client, target, cred, fetcher = fetch) {
   const identity = accountIdentityOf(cred).id
   if (!identity || !client?.auth?.set) return null
   const key = recordKeyFor(target, identity)
@@ -3803,32 +3721,7 @@ async function writeSharedRecord(client, target, cred, fetcher = fetch, recordsP
   } catch {
     return null
   }
-  sharedAccountKeys.set(`${target}\n${identity}`, key)
-  rememberRecordKey(recordsPath, target, identity, key)
   return { key, body }
-}
-
-/** Hand a renewed credential to the other record of the same account, if ours — also after a restart. */
-async function pushSharedRecord(client, target, cred, fetcher = fetch, recordsPath = "") {
-  const identity = accountIdentityOf(cred).id
-  if (!identity || !client?.auth?.set) return
-  // Only a record the target provider's own listing has shown this process
-  // holds is known to still exist. A remembered key is a hint for where to
-  // write, never proof that the account is still there — a key that outlives
-  // the account writes it back on the next renewal. Nothing is pushed before
-  // the first listing; that record then renews on its own, or asks to sign in
-  // if its token was spent.
-  if (!seenProviderAccounts.get(target)?.has(identity)) return
-  const key = recordKeyOf(recordsPath, target, identity)
-  if (!key) return
-  const body = target === OFFICEACE_PROVIDER
-    ? officeAceRecordBody(await withOfficeAceMaas(cred, fetcher))
-    : codeArtsRecordBody(cred)
-  try {
-    await client.auth.set({ path: { id: key }, body })
-  } catch {
-    /* best effort: the other record renews on its own */
-  }
 }
 
 /**
@@ -3960,8 +3853,6 @@ async function persistOfficeAceRecord(client, cred, prev) {
  */
 export const OfficeAceAuthPlugin = async ({ client } = {}, options = {}) => {
   const fetcher = typeof options?.fetch === "function" ? options.fetch : fetch
-  // The same file the CodeArts instance writes, so the push survives a restart.
-  const recordsPath = typeof options?.recordsPath === "string" && options.recordsPath ? options.recordsPath : defaultRecordsPath()
   const log = (message, level = "info") => {
     try {
       client?.app?.log?.({ service: "officeace", level, message })
@@ -3995,7 +3886,7 @@ export const OfficeAceAuthPlugin = async ({ client } = {}, options = {}) => {
           // is only ever written by a sign-in (this card's, or the CodeArts
           // card's beside it) — an account the user signed out of must not come
           // back on the next listing.
-          noteProviderEmpty(OFFICEACE_PROVIDER, recordsPath)
+          noteProviderEmpty(OFFICEACE_PROVIDER)
           return provider.models
         }
         const identity = accountIdentityOf(cred).id
@@ -4079,8 +3970,8 @@ export const OfficeAceAuthPlugin = async ({ client } = {}, options = {}) => {
                   // One sign-in, two providers: the CodeArts card takes the same
                   // account, and this card's record lands where a renewal can
                   // find it again.
-                  await writeSharedRecord(client, PROVIDER, withMaas, fetcher, recordsPath)
-                  await writeSharedRecord(client, OFFICEACE_PROVIDER, withMaas, fetcher, recordsPath)
+                  await writeSharedRecord(client, PROVIDER, withMaas, fetcher)
+                  await writeSharedRecord(client, OFFICEACE_PROVIDER, withMaas, fetcher)
                   return { ...officeAceRecordBody(withMaas), type: "success" }
                 } catch (e) {
                   return { type: "failed", error: e?.message ?? String(e) }
@@ -4100,7 +3991,6 @@ export const OfficeAceAuthPlugin = async ({ client } = {}, options = {}) => {
         const next = await renewNow(cred)
         if (!next) return undefined
         const body = officeAceRecordBody(next)
-        await pushSharedRecord(client, PROVIDER, next, fetcher, recordsPath)
         // magpie merges this into the stored record. `accountId` is what the
         // user's own name, proxy and gateway key for the account hang off, so a
         // renewal never renames one: a stored value stands (phone or domain id,
@@ -4168,7 +4058,6 @@ export const OfficeAceAuthPlugin = async ({ client } = {}, options = {}) => {
                   const next = await renewNow(fresh)
                   if (next) {
                     await persistOfficeAceRecord(client, next, freshRecord ?? stored)
-                    await pushSharedRecord(client, PROVIDER, next, fetcher, recordsPath)
                   }
                   return next
                 } catch (e) {
@@ -4244,10 +4133,10 @@ export const _officeace = {
   fetchOfficeAceTokenRates, fetchOfficeAceCatalog, fetchOfficeAceMaasInfo, officeAceMaasInfo,
   signOfficeAceV11, oaSdkDate, officeAceSigned, basicAuthorization, isCodeArtsClient,
   renewOfficeAceCredential, renewSharedCredential, nearOfficeAceExpiry,
-  accountKeySuffix, recordKeyFor, writeSharedRecord, pushSharedRecord,
+  accountKeySuffix, recordKeyFor, writeSharedRecord,
   refreshClientOf, refreshChainOf, refreshLineages, lineageOf, linkRotation, rememberLineage,
   noteProviderAccount, noteProviderEmpty, seenProviderAccounts,
-  sharedAccountKeys, renewalGates, withOfficeAceMaas, persistOfficeAceRecord,
+  renewalGates, withOfficeAceMaas, persistOfficeAceRecord,
   OFFICEACE_ICON,
 }
 

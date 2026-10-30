@@ -150,14 +150,11 @@ many hooks ask.
 An `officeace-auth` record beside a CodeArts record holds a different token (issuer
 `pdp5_for_agentarts` against `codearts-agent`), so it is another chain: it spends its own token,
 keeps its own MaaS pair, and a renewal that fails fails — it is never handed the other record's
-credential. The first record's renewal still *pushes* the new credential to the other one at the
-key this package wrote for it — but **only when the target provider's own listing has shown that
-account in this process**; a remembered key is a hint for where to write, never proof the account
-still exists. Those keys are kept in a small file (`~/.config/magpie/codearts-records.json`,
-`MAGPIE_CODEARTS_RECORDS`), because magpie restarts on every update and an in-memory map would be
-empty by the time the first renewal after the restart spends the shared token. A removed record is
-therefore never written back: before the first listing nothing is pushed, and after it the account
-is simply not there.
+credential. Neither record's renewal writes the other: the two only share the sign-in that created
+them, never a credential afterwards. The first of the two to renew spends the shared token; the
+other one's next renewal is refused (`STS5.1806`) and asks for the sign-in again. That is
+deliberate — writing the new credential into the other record is exactly what used to bring a
+removed account back — and it is the price stated under *Known limits*.
 
 **Models.** OfficeAce's catalog (`GET {maas}/v2/models`) is a registry, not a promise: 26 entries,
 most of which answer `404 ModelArts.81009 Invalid model` at chat. The plugin cuts it down to the
@@ -183,17 +180,13 @@ under **Settings → Usage → Plugins**.
 
 **Known limits.**
 
-- STS spends a refresh token once, and the two records of one sign-in share one token. The first
-  renewal spends it and pushes the new credential to the other record — across a magpie restart
-  too, because the key this package wrote for that record is on disk. A record whose token was
-  spent by *another* process before its push reached it fails its renewal and asks for the
-  sign-in again rather than taking another record's credential. Two separate magpie processes
-  renewing at the very same moment can still race; the loser asks again and is signed out only
-  if the token stays spent. A removed account stays removed: a renewal pushes only to a record
-  the target provider's own listing has shown in this process — a remembered key alone is never
-  enough — and a provider listed with no accounts forgets the keys it wrote. Nothing is pushed
-  before that first listing: the other record then renews on its own, or asks for the sign-in
-  again if its token was spent.
+- STS spends a refresh token once, and the two records of one sign-in share one token. Only the
+  first of them to renew gets a new one; **the other record's next renewal fails (`STS5.1806`)
+  and asks for the sign-in again**. That is the price of never writing one record from another —
+  and the reason a record the user removed can never come back: a renewal writes no other
+  record, whether it was listed, used, or not seen at all. Two separate magpie processes renewing
+  the same account at the same moment still race; the loser asks again and is signed out only if
+  the token stays spent.
 - `officeace-auth` and this package cannot both serve the `officeace` provider id. Magpie asks
   which plugin serves it; remove the old one.
 
@@ -206,7 +199,6 @@ under **Settings → Usage → Plugins**.
 | `retryDelays` | `[2000,4000,6000,8000,10000]` | retry waits in ms (the last repeats) |
 | `queueBudgetMs` | `300000` | how long to wait in the gateway's queue |
 | `thinking` | `true` | `false` stops adding `thinking: { type: "enabled" }` |
-| `recordsPath` | `~/.config/magpie/codearts-records.json` | where the keys of the sibling records this package wrote are kept (`MAGPIE_CODEARTS_RECORDS` overrides the default) |
 
 ## Credits
 
@@ -279,11 +271,10 @@ OfficeAce 在 0.3.0 之前是独立的 `officeace-auth` 包：那些账号按 ma
 - **OfficeAce 的用量与签到**：`/v1/subscription` 的套餐桶（`skus[].quotas`）与活动桶（`bonus_skus`）转成 magpie 的窗口；
   `.trial` 桶没有到期时间就不显示；已过期的桶收进折叠区（`aside`）且不参与路由。签到是每个北京自然日一次
   `POST /v1/subscription/bonus/claim`：2xx 但 `bonus_skus` 为空是「今日已无新增可领」（`done`），不是失败。
-- **已知限制**：STS 的 refresh_token 只能用一次，同一次登录写出的两条记录共用同一个 token。先续期的一方花掉它，并把新凭据
-  推给另一条记录——**magpie 重启后也一样**，因为本包给那条记录写的 key 存在磁盘上（`~/.config/magpie/codearts-records.json`，
-  可用 `MAGPIE_CODEARTS_RECORDS` 改）。若 token 已被**另一个进程**花掉、推送没赶上，那条记录续期会失败并要求重新登录，
-  而不是拿走别的链的凭据。两个 magpie 进程同时续期仍可能撞车，输的一方重试，只有 token 一直是被消费状态才标记需重新登录。
-  **不建议只删两条记录中的一条**：另一条下次续期会按记住的 key 把它写回来（要删请两条一起删）。
+- **已知限制**：STS 的 refresh_token 只能用一次，同一次登录写出的两条记录共用同一个 token。先续期的一方拿到新 token；
+  **另一条记录下次续期会失败（`STS5.1806`）并要求重新登录**。这是「续期绝不写另一条记录」的代价，换来的是：
+  用户删掉的账号永远不会被写回来（无论它此前有没有被列出/使用过、有没有重启）。两个 magpie 进程同时续期仍可能撞车，
+  输的一方重试，只有 token 一直是被消费状态才标记需重新登录。
   另外，`officeace-auth` 与本包不能同时服务 `officeace` 这个 provider id，magpie 会让你选一个，装之前先卸掉旧的。
 - **致谢**：原作者 [yuweihao17](https://github.com/yuweihao17/codearts)；HuHong-Tao、ReachForStar 的
   实测与实现；[Ebony-Vinyl/dsh-our-free-model](https://github.com/Ebony-Vinyl/dsh-our-free-model)。
