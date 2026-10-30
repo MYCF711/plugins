@@ -3607,25 +3607,72 @@ const renewalGates = new Map()
 // gone; the name stays an alias of the gate, so a test that resets process
 // state still resets something real.
 const liveAccounts = renewalGates
+/** refresh token → the lineage it belongs to (a rotation keeps its parent's). */
+const refreshLineages = new Map()
+/** How long a spent token's renewal stands in for it. */
+const CHAIN_LIVE_MS = 10 * 60 * 1000
+/** How many token lineages are remembered: one per rotation, oldest dropped. */
+const LINEAGE_CAP = 1024
 
 /** A stable 8-hex suffix of the account's identity — a key no other account gets. */
 function accountKeySuffix(identity) {
   return createHash("sha256").update(String(identity)).digest("hex").slice(0, 8)
 }
 
+/** The OAuth client a credential's refresh token was issued to. */
+function refreshClientOf(cred) {
+  // A canonical credential with no marker of its own is this package's own shape
+  // (the CodeArts reader stamps it); only the old OfficeAce chain says pdp5.
+  return firstOf(cred?.oauth_client) === OA_AGENTARTS_CLIENT_ID ? OA_AGENTARTS_CLIENT_ID : "codearts-agent"
+}
+
+/**
+ * The lineage a refresh token belongs to. A token never seen is its own
+ * lineage; a rotation answers a new token for the same chain, and
+ * `linkRotation` writes that down — so a record still holding the spent token
+ * is known to belong to the chain that replaced it.
+ */
+function lineageOf(token) {
+  const held = refreshLineages.get(token)
+  if (held) return held
+  const fresh = createHash("sha256").update(`refresh-chain\n${token}`).digest("hex").slice(0, 16)
+  rememberLineage(token, fresh)
+  return fresh
+}
+
+function rememberLineage(token, lineage) {
+  if (!token || !lineage) return
+  if (!refreshLineages.has(token) && refreshLineages.size >= LINEAGE_CAP) {
+    // Oldest first. Forgetting a lineage only means a chain is not recognised —
+    // that record then spends its own token and fails; two chains never merge.
+    const oldest = refreshLineages.keys().next().value
+    if (oldest !== undefined) refreshLineages.delete(oldest)
+  }
+  refreshLineages.set(token, lineage)
+}
+
 /**
  * The refresh chain a credential's token belongs to: the OAuth client it was
- * issued to, plus the token itself. STS spends a refresh token once, so the
- * token is the unit of coordination — and a token issued to one client must
+ * issued to, plus the token's lineage. STS spends a refresh token once, so the
+ * chain is the unit of coordination — and a token issued to one client must
  * never be sent to the other, which is why the client is in the key too.
  *
  * The token, not the account: two records of one Huawei Cloud account can sit
  * on two chains, and one must never be renewed with the other's credential.
  */
-function refreshChainOf(cred) {
+function refreshChainOf(cred, client = refreshClientOf(cred)) {
   const token = firstOf(cred?.refresh_token)
-  if (!token) return ""
-  return `${isCodeArtsClient(cred) ? "codearts-agent" : OA_AGENTARTS_CLIENT_ID}\n${token}`
+  if (!token) return { key: "", client, token, lineage: "" }
+  const lineage = lineageOf(token)
+  return { key: `${client}\n${lineage}`, client, token, lineage }
+}
+
+/** A rotation answers a new refresh token for the same chain: remember the parent. */
+function linkRotation(cred, next) {
+  const from = firstOf(cred?.refresh_token)
+  const to = firstOf(next?.refresh_token)
+  if (!from || !to || from === to) return
+  rememberLineage(to, lineageOf(from))
 }
 
 function noteProviderAccount(provider, identity) {
@@ -3712,11 +3759,12 @@ async function pushSharedRecord(client, target, cred, fetcher = fetch) {
  * CodeArts one) never meet in here at all — each spends its own token, and a
  * renewal that fails is a failure, never another chain's credential.
  */
-function renewSharedCredential(cred, run) {
-  const chain = refreshChainOf(cred)
-  if (!chain) return Promise.resolve().then(run)
-  const held = renewalGates.get(chain)
-  if (held) return held.promise
+function renewSharedCredential(cred, run, client = refreshClientOf(cred)) {
+  const token = firstOf(cred?.refresh_token)
+  const chain = refreshChainOf(cred, client)
+  if (!chain.key) return Promise.resolve().then(run)
+  const held = renewalGates.get(chain.key)
+  if (held && held.from === token) return held.promise
   const promise = Promise.resolve()
     .then(run)
     .then((next) => {
@@ -3725,12 +3773,17 @@ function renewSharedCredential(cred, run) {
       for (const k of ["model_app_key", "model_app_secret", "maas_base_url", "user_phone", "domain_id", "oauth_client"]) {
         if (cred[k] && !next[k]) next[k] = cred[k]
       }
+      // The new token belongs to the same chain: a record still holding the
+      // spent one is known to be on it (the gate above), and the push below
+      // hands it the credential. Nothing else is remembered, so a credential a
+      // hook merely saw can never stand in for a newer one.
+      linkRotation(cred, next)
       return next
     })
     .finally(() => {
-      if (renewalGates.get(chain)?.promise === promise) renewalGates.delete(chain)
+      if (renewalGates.get(chain.key)?.promise === promise) renewalGates.delete(chain.key)
     })
-  renewalGates.set(chain, { from: firstOf(cred.refresh_token), promise })
+  renewalGates.set(chain.key, { from: token, promise })
   return promise
 }
 
@@ -3747,7 +3800,8 @@ async function renewOfficeAceCredential(cred, fetcher = fetch) {
     throw Object.assign(new Error("OfficeAce 凭据无法续期（DPoP 私钥缺失），请重新登录"), { signIn: "expired" })
   }
   const keyPair = keyPairFromStoredJwk(cred.dpop_private_key_jwk)
-  const token = isCodeArtsClient(cred)
+  const client = refreshClientOf(cred)
+  const token = client === "codearts-agent"
     ? await requestToken({
         client_id: CLIENT_ID,
         code_verifier: firstOf(cred.code_verifier),
@@ -3766,7 +3820,7 @@ async function renewOfficeAceCredential(cred, fetcher = fetch) {
     if (cred[k]) next[k] = cred[k]
   }
   if (!next.refresh_token) next.refresh_token = cred.refresh_token
-  if (!next.oauth_client) next.oauth_client = isCodeArtsClient(cred) ? "codearts-agent" : OA_AGENTARTS_CLIENT_ID
+  if (!next.oauth_client) next.oauth_client = client
   // The MaaS Basic pair is minted per permission check and can rotate with the
   // session: read it again when this account has one. Best effort — the stored
   // pair stands when the CLAW call is down.
@@ -4107,7 +4161,8 @@ export const _officeace = {
   fetchOfficeAceTokenRates, fetchOfficeAceCatalog, fetchOfficeAceMaasInfo, officeAceMaasInfo,
   signOfficeAceV11, oaSdkDate, officeAceSigned, basicAuthorization, isCodeArtsClient,
   renewOfficeAceCredential, renewSharedCredential, nearOfficeAceExpiry,
-  accountKeySuffix, recordKeyFor, writeSharedRecord, pushSharedRecord, refreshChainOf,
+  accountKeySuffix, recordKeyFor, writeSharedRecord, pushSharedRecord,
+  refreshClientOf, refreshChainOf, refreshLineages, lineageOf, linkRotation, rememberLineage,
   noteProviderAccount, noteProviderEmpty, seenProviderAccounts,
   liveAccounts, sharedAccountKeys, renewalGates, withOfficeAceMaas, persistOfficeAceRecord,
   OFFICEACE_ICON,

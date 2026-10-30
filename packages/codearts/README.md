@@ -143,8 +143,10 @@ the phone `officeace-auth` 0.1.14 stored — and a value computed from the crede
 filled in when the record has none. A new sign-in names its account by the domain id.
 
 **A record is renewed only with its own refresh token.** The unit of coordination is the refresh
-chain: the OAuth client a token was issued to plus the token itself. Two records written from one
-sign-in hold the same token and are one chain — that token is spent once however many hooks ask.
+chain: the OAuth client a token was issued to plus the token's lineage (a rotation keeps its
+parent's, so a record still holding the spent token is known to be on the same chain). Two records
+written from one sign-in hold the same token and are one chain — that token is spent once however
+many hooks ask.
 An `officeace-auth` record beside a CodeArts record holds a different token (issuer
 `pdp5_for_agentarts` against `codearts-agent`), so it is another chain: it spends its own token,
 keeps its own MaaS pair, and a renewal that fails fails — it is never handed the other record's
@@ -249,7 +251,8 @@ OfficeAce 在 0.3.0 之前是独立的 `officeace-auth` 包：那些账号按 ma
   **绝不是打码手机号**（#483、magpie#4416；magpie 把用户给账号起的名字、代理、网关 key 都挂在 `accountId` 上，
   手机号只出现在 `usage().user`）。续期不会重命名账号：记录里已有的 `accountId`/`uid` 原样保留（域名 id，或
   `officeace-auth` 0.1.14 存下的手机号），只在该值为空时才补一个。新登录写的 `accountId` 是域名 id。
-  续期只花**这条记录自己的 refresh token**：协调单位是「refresh chain = 签发它的 OAuth 客户端 + token 本身」。
+  续期只花**这条记录自己的 refresh token**：协调单位是「refresh chain = 签发它的 OAuth 客户端 + token 的血缘」
+  （轮换后的新 token 记在父 token 同一血缘上，仍算同一条链）。
   同一次登录写出的两条记录持有同一个 token，算同一条链，一个进程内只花一次；老 `officeace-auth` 记录与码道记录
   是两个 token（`pdp5_for_agentarts` 与 `codearts-agent`），各花各的，各自保留自己的 MaaS 凭据，续期失败就是失败，
   绝不会借用另一条记录的凭据；先续期的那条记录仍会把新凭据推给本包写过的另一条。

@@ -3124,13 +3124,23 @@ test("a spent token is not renewed again, and is never refilled from another cha
   assert.equal(stsCalls, 2, "each attempt spends what the record holds — nothing else")
 })
 
-test("the refresh chain is the OAuth client plus the token, never the account", () => {
+test("the refresh chain is the OAuth client plus the token's lineage, never the account", () => {
   const token = "h.x.y"
   const pdp = oa.refreshChainOf({ refresh_token: token, oauth_client: "pdp5_for_agentarts" })
   const ca = oa.refreshChainOf({ refresh_token: token, oauth_client: "codearts-agent" })
-  assert.notEqual(pdp, ca, "one token at two clients is two chains")
-  assert.equal(pdp, oa.refreshChainOf({ refresh_token: token, oauth_client: "pdp5_for_agentarts" }))
-  assert.equal(oa.refreshChainOf({}), "")
+  assert.notEqual(pdp.key, ca.key, "one token at two clients is two chains")
+  assert.equal(pdp.key, oa.refreshChainOf({ refresh_token: token, oauth_client: "pdp5_for_agentarts" }).key)
+  assert.equal(oa.refreshChainOf({}).key, "")
+  // a rotation answers a new token for the same chain: the lineage — and so the
+  // gate key — is the parent's, not a fresh one (review of #522 asked for this
+  // by name: "the OAuth client plus the token lineage").
+  oa.refreshLineages.clear()
+  const parent = oa.refreshChainOf({ refresh_token: "T1", oauth_client: "codearts-agent" })
+  oa.linkRotation({ refresh_token: "T1" }, { refresh_token: "T2" })
+  const child = oa.refreshChainOf({ refresh_token: "T2", oauth_client: "codearts-agent" })
+  assert.equal(child.lineage, parent.lineage)
+  assert.equal(child.key, parent.key)
+  assert.notEqual(oa.refreshChainOf({ refresh_token: "T3", oauth_client: "codearts-agent" }).key, parent.key)
 })
 
 test("two records on different chains renew independently, each with its own client", async () => {
