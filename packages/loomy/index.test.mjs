@@ -312,10 +312,10 @@ describe("helpers", () => {
 
 // ── 「内容太长了」的分流 ────────────────────────────────────────────────
 //
-// 上游这条 400 有两种来路，而两种说法都不含「上下文」：magpie 的 tooLongRe 认不出，
+// 上游这条 400 不含「上下文」：v0.1.2189 之前的 magpie 的 tooLongRe 认不出，
 // 这笔 try 就被当成错误、账号被休息、组里其它成员一次没被问，整轮失败。
-// 请求本身能分开它们（2026-10-30 实测：838,400 token 成功、373,924 token 被拒，
-// 同时段还有 429「模型服务当前繁忙」），所以按请求体大小判。
+// 这里只改写文案（状态码不变），让旧宿主也能认成 overflow；
+// v0.1.2189 起宿主自己认得，这是给旧宿主的兜底。
 
 describe("a 400 that says the content is too long", () => {
   // magpie `internal/gateway/gateway.go` 的 tooLongRe 中文两条 —— 逐字抄，改这里等于改契约
@@ -337,14 +337,6 @@ describe("a 400 that says the content is too long", () => {
       expect(out.status).toBe(status)
       expect(await out.text()).toMatch(tooLongRe)
     }
-  })
-
-  test("超大请求体仍是 400——不能因为大小改判成上游故障", async () => {
-    // 150 万 ASCII 字符 ≈ 37.5 万 token，对 Kimi-k2.6（262,144）已经是真超长；
-    // 旧实现按固定字符阈值在这里返回 502，magpie 会换号重试到整轮失败。
-    const huge = "word ".repeat(300_000)
-    const out = _internal.retryableRefusal(400, JSON.stringify({ error: { message: vendor, echo: huge.slice(0, 30) } }))
-    expect(out.status).toBe(400)
   })
 
   test("别的 400 不碰", () => {

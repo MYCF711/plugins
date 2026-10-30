@@ -81,23 +81,20 @@ const errorResponse = (status, message) =>
   new Response(JSON.stringify({ error: { message } }), { status, headers: { "content-type": "application/json" } })
 
 /**
- * 「内容太长了，请精简输入或开启新对话」 covers two very different situations:
- * the request really is bigger than the model's window, and the upstream is
- * merely busy. Neither wording names 「上下文」, so magpie's `tooLongRe`
- * (`internal/gateway/gateway.go`) does not match it: the try is filed as an
- * error that rests the account, the group's other members are never asked, and
- * the whole turn fails.
+ * 「内容太长了，请精简输入或开启新对话」 does not name 「上下文」, so magpie
+ * versions before v0.1.2189 do not match it with `tooLongRe`
+ * (`internal/gateway/gateway.go`): the try is filed as an error that rests the
+ * account, the group's other members are never asked, and the whole turn fails.
  *
- * The request itself tells the two apart, so classify by size instead of
- * trusting the wording:
+ * This rewrites the wording to one `tooLongRe` knows, so the agent compacts
+ * instead of the turn failing. The status code is passed through unchanged:
+ * whether the request is really over length or the upstream is merely busy is
+ * not something this plugin can tell from the body, and guessing wrong (turning
+ * a real overflow into a 502) makes magpie retry every account and end the turn
+ * in 502.
  *
- *   · far below the declared window ⇒ not a length problem ⇒ 502, which magpie
- *     retries on another account in seconds
- *   · otherwise ⇒ rewrite to a wording `tooLongRe` knows, so the agent
- *     compacts instead of the turn failing
- *
- * Measured 2026-10-30: an 838,400-token request succeeded while a 373,924-token
- * one was refused this way, and the same window carried `429 模型服务当前繁忙`.
+ * v0.1.2189 and later already match this wording in the host, so this is a
+ * fallback for older hosts.
  *
  * ⚠ History: the 502 branch was removed on review. A fixed character threshold
  * knows nothing about the model's own window (Kimi-k2.6 is 262,144 tokens, but
