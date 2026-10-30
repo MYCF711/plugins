@@ -649,7 +649,10 @@ function credentialOf(auth) {
   const raw = typeof auth.access === "string" ? auth.access : ""
   if (!raw) return null
   const cred = safeJson(raw)
-  return cred && typeof cred.access_key_id === "string" && cred.access_key_id ? cred : null
+  if (!cred || typeof cred.access_key_id !== "string" || !cred.access_key_id) return null
+  // Which OAuth client a refresh token may be spent at. A record read here is
+  // one this package's CodeArts sign-in wrote, whatever an older one lacks.
+  return { ...cred, oauth_client: firstOf(cred.oauth_client, "codearts-agent") }
 }
 
 function expiresFromCredential(cred) {
@@ -2488,7 +2491,6 @@ export const CodeArtsAuthPlugin = async ({ client } = {}, options = {}) => {
       const promise = renewSharedCredential(cred, () => refreshCredential(cred, fetcher))
         .then(async (next) => {
           state.renewed = { from: token, next }
-          rememberLiveAccount(next)
           // The OfficeAce record of this account is the same sign-in: hand it
           // the renewed credential as well, so neither record is left with a
           // refresh token the other has already spent.
@@ -2558,12 +2560,10 @@ export const CodeArtsAuthPlugin = async ({ client } = {}, options = {}) => {
       async models(provider, { auth } = {}) {
         const cred = credentialOf(auth)
         if (!cred?.access_key_id) {
-          // A models hook that runs with no auth is a provider with no accounts;
-          // the OfficeAce card reads that to carry this sign-in over.
+          // A models hook that runs with no auth is a provider with no accounts.
           noteProviderEmpty(PROVIDER)
           return provider.models
         }
-        rememberLiveAccount(cred)
         const identity = accountIdentityOf(cred).id
         if (identity) noteProviderAccount(PROVIDER, identity)
         try {
@@ -2617,7 +2617,6 @@ export const CodeArtsAuthPlugin = async ({ client } = {}, options = {}) => {
         let account = await getAuth()
         let cred = credentialOf(account)
         if (!cred?.access_key_id || !cred?.secret_access_key) return {}
-        rememberLiveAccount(cred)
         const identity = accountIdentityOf(cred).id
         if (identity) noteProviderAccount(PROVIDER, identity)
 
@@ -2699,7 +2698,6 @@ export const CodeArtsAuthPlugin = async ({ client } = {}, options = {}) => {
         const auth = await getAuth()
         const cred = credentialOf(auth)
         if (!cred?.access_key_id) return { error: "not signed in", windows: [] }
-        rememberLiveAccount(cred)
         const identity = accountIdentityOf(cred).id
         if (identity) noteProviderAccount(PROVIDER, identity)
         try {
@@ -3050,14 +3048,19 @@ function officeAceCredentialRecord(cred) {
   }
 }
 
-/** `{ accountId, uid }` as the OfficeAce card has always shown them. */
+/**
+ * What magpie shows for an OfficeAce account.
+ *
+ * `accountId` is the vendor's own stable id — the IAM domain id, as the record
+ * `officeace-auth` wrote carried — and never the masked phone: the name,
+ * proxy and gateway key a user gives an account hang off `accountId`, so a
+ * phone there is both a display leak and a re-keying of that account (#483,
+ * magpie#4416). The phone is only ever `usage().user`. `uid` is the same id.
+ */
 function officeAceIdentityOf(cred) {
   const profile = profileOf(cred) || {}
   const domain = firstOf(profile.account_id, profile.domain_id, cred?.domain_id)
-  return {
-    accountId: firstOf(cred?.user_phone, domain),
-    uid: domain,
-  }
+  return { accountId: domain, uid: domain }
 }
 
 /** The `{type, refresh, access, expires, accountId, uid}` magpie keeps for OfficeAce. */
@@ -3582,28 +3585,47 @@ function officeAceDiagnose(status, renewal) {
 //
 // What is remembered here is in this module, shared by the package's two
 // plugins (one process, one module): which accounts each provider has, which
-// key this package wrote, and the last live credential of each account. A
+// key this package wrote, and the renewal in flight for each refresh chain. A
 // record is never written to a key another account may sit at, and a record
 // that already holds the account is never written again.
+//
+// Two records of one account may hold the *same* refresh token (a sign-in
+// writes both from one credential), and then they are on one chain: renewing
+// once serves both. They may also hold different tokens — an `officeace-auth`
+// record has its own chain, issued to `pdp5_for_agentarts`, beside a CodeArts
+// record issued to `codearts-agent` — and those are two chains: each is only
+// ever renewed with its own token, and a failed renewal fails.
 
 /** `${provider}\n${identity}` → the key this package wrote there. */
 const sharedAccountKeys = new Map()
 /** provider id → the identities its accounts were seen as. */
 const seenProviderAccounts = new Map()
-/** identity → { at, token, cred }: the newest credential this process has. */
-const liveAccounts = new Map()
-/** identity → { from, promise }: the renewal in flight. */
+/** refresh chain → { from, promise }: the renewal in flight. */
 const renewalGates = new Map()
+// `liveAccounts` was the ledger of "the newest credential seen for an account"
+// — what handed one record another chain's credential (review of #522). It is
+// gone; the name stays an alias of the gate, so a test that resets process
+// state still resets something real.
+const liveAccounts = renewalGates
 
 /** A stable 8-hex suffix of the account's identity — a key no other account gets. */
 function accountKeySuffix(identity) {
   return createHash("sha256").update(String(identity)).digest("hex").slice(0, 8)
 }
 
-function rememberLiveAccount(cred) {
-  const identity = accountIdentityOf(cred).id || cred.account_id || cred.access_key_id
-  if (!identity) return
-  liveAccounts.set(identity, { at: Date.now(), token: firstOf(cred.refresh_token), cred })
+/**
+ * The refresh chain a credential's token belongs to: the OAuth client it was
+ * issued to, plus the token itself. STS spends a refresh token once, so the
+ * token is the unit of coordination — and a token issued to one client must
+ * never be sent to the other, which is why the client is in the key too.
+ *
+ * The token, not the account: two records of one Huawei Cloud account can sit
+ * on two chains, and one must never be renewed with the other's credential.
+ */
+function refreshChainOf(cred) {
+  const token = firstOf(cred?.refresh_token)
+  if (!token) return ""
+  return `${isCodeArtsClient(cred) ? "codearts-agent" : OA_AGENTARTS_CLIENT_ID}\n${token}`
 }
 
 function noteProviderAccount(provider, identity) {
@@ -3662,7 +3684,6 @@ async function writeSharedRecord(client, target, cred, fetcher = fetch) {
   }
   sharedAccountKeys.set(`${target}\n${identity}`, key)
   noteProviderAccount(target, identity)
-  rememberLiveAccount(cred)
   return { key, body }
 }
 
@@ -3683,23 +3704,19 @@ async function pushSharedRecord(client, target, cred, fetcher = fetch) {
 }
 
 /**
- * Renew one Huawei Cloud credential, once, whoever asks for it.
+ * Renew one Huawei Cloud credential, once per refresh chain.
  *
- * Both providers of an account read the same refresh chain: STS spends a
- * refresh token once, so a second use of it would turn the account away. The
- * second caller here gets the first's answer (in this process), and a caller
- * that meets an already-spent token takes whatever this process renewed a
- * moment ago instead of failing.
+ * Two records of one account that were written from one sign-in hold the same
+ * refresh token: STS spends it once, so the second caller here gets the first's
+ * answer. Two records on different chains (an `officeace-auth` record beside a
+ * CodeArts one) never meet in here at all — each spends its own token, and a
+ * renewal that fails is a failure, never another chain's credential.
  */
 function renewSharedCredential(cred, run) {
-  const identity = accountIdentityOf(cred).id || cred.account_id || cred.access_key_id
-  const token = firstOf(cred.refresh_token)
-  const held = renewalGates.get(identity)
-  if (held && held.from === token) return held.promise
-  const live = liveAccounts.get(identity)
-  if (live?.token && token && live.token !== token && Date.now() - live.at < 10 * 60 * 1000) {
-    return Promise.resolve(live.cred)
-  }
+  const chain = refreshChainOf(cred)
+  if (!chain) return Promise.resolve().then(run)
+  const held = renewalGates.get(chain)
+  if (held) return held.promise
   const promise = Promise.resolve()
     .then(run)
     .then((next) => {
@@ -3708,18 +3725,12 @@ function renewSharedCredential(cred, run) {
       for (const k of ["model_app_key", "model_app_secret", "maas_base_url", "user_phone", "domain_id", "oauth_client"]) {
         if (cred[k] && !next[k]) next[k] = cred[k]
       }
-      rememberLiveAccount(next)
       return next
     })
-    .catch((e) => {
-      const again = liveAccounts.get(identity)
-      if (again?.token && token && again.token !== token) return again.cred
-      throw e
-    })
     .finally(() => {
-      if (renewalGates.get(identity)?.promise === promise) renewalGates.delete(identity)
+      if (renewalGates.get(chain)?.promise === promise) renewalGates.delete(chain)
     })
-  renewalGates.set(identity, { from: token, promise })
+  renewalGates.set(chain, { from: firstOf(cred.refresh_token), promise })
   return promise
 }
 
@@ -3770,49 +3781,38 @@ async function renewOfficeAceCredential(cred, fetcher = fetch) {
 }
 
 /**
- * Carry a CodeArts account into OfficeAce without a second sign-in.
- *
- * Called when the OfficeAce card is listed with no account of its own — which
- * the hooks can tell (a models hook that runs with no `auth` is a provider with
- * no accounts). The account comes from the credential this process last saw
- * for the CodeArts provider: the same Huawei Cloud account, one sign-in.
- * Nothing is written when the account's OfficeAce side can't even be checked
- * (the CLAW call is down), so a later listing tries again instead of leaving a
- * record that can't work.
+ * Is this credential close enough to its expiry to renew first?
  */
-async function adoptCodeArtsAccount(client, fetcher = fetch) {
-  if (!client?.auth?.set) return null
-  const known = seenProviderAccounts.get(OFFICEACE_PROVIDER)
-  if (known && known.size > 0) return null
-  const candidates = [...liveAccounts.entries()]
-    .filter(([, live]) => !!live.cred?.access_key_id)
-    .sort((a, b) => b[1].at - a[1].at)
-  for (const [identity, live] of candidates) {
-    if (seenProviderAccounts.get(OFFICEACE_PROVIDER)?.has(identity)) continue
-    const info = await officeAceMaasInfo(live.cred, fetcher).catch(() => null)
-    if (!info) continue
-    const adopted = { ...live.cred, ...info }
-    const written = await writeSharedRecord(client, OFFICEACE_PROVIDER, adopted, fetcher)
-    if (written) return adopted
-  }
-  return null
-}
-
-/** Is this credential close enough to its expiry to renew first? */
 function nearOfficeAceExpiry(cred) {
   const at = Date.parse(firstOf(cred?.expires_at))
   return Number.isFinite(at) && at - Date.now() <= OA_REFRESH_LEAD_MS
 }
 
-/** Store an OfficeAce record for the account this hook runs for (its own scope's key). */
-async function persistOfficeAceRecord(client, cred) {
+/**
+ * Store an OfficeAce record for the account this hook runs for (its own
+ * scope's key), keeping the account's stored `accountId` / `uid`.
+ *
+ * magpie hangs a user's own name, proxy and gateway key for an account off
+ * `accountId`; rewriting it (a phone, or a domain id over the phone an older
+ * `officeace-auth` stored) would re-key the account. So a stored value stands,
+ * and one computed from the credential is only filled in when there is none —
+ * as CodeArts' own `persistCredential` does.
+ */
+async function persistOfficeAceRecord(client, cred, prev) {
   const body = officeAceRecordBody(cred)
+  const accountId = firstOf(prev?.accountId, body.accountId)
+  const uid = firstOf(prev?.uid, body.uid)
+  const record = {
+    ...body,
+    ...(accountId ? { accountId } : {}),
+    ...(uid ? { uid } : {}),
+  }
   try {
-    await client?.auth?.set?.({ path: { id: OFFICEACE_PROVIDER }, body })
+    await client?.auth?.set?.({ path: { id: OFFICEACE_PROVIDER }, body: record })
   } catch {
     /* best effort: the next renewal writes it again */
   }
-  return body
+  return record
 }
 
 /**
@@ -3854,13 +3854,12 @@ export const OfficeAceAuthPlugin = async ({ client } = {}, options = {}) => {
       async models(provider, { auth } = {}) {
         let cred = credential(auth)
         if (!cred) {
-          // No account of its own: one Huawei Cloud sign-in may already be here
-          // as the CodeArts provider's account, and it serves this one too.
+          // No account of its own: nothing is adopted here. An OfficeAce record
+          // is only ever written by a sign-in (this card's, or the CodeArts
+          // card's beside it) — an account the user signed out of must not come
+          // back on the next listing.
           noteProviderEmpty(OFFICEACE_PROVIDER)
-          const adopted = await adoptCodeArtsAccount(client, fetcher)
-          if (!adopted) return provider.models
-          log("从 CodeArts 的登录带入了同一个华为云账号")
-          cred = adopted
+          return provider.models
         }
         const identity = accountIdentityOf(cred).id
         if (identity) noteProviderAccount(OFFICEACE_PROVIDER, identity)
@@ -3965,20 +3964,24 @@ export const OfficeAceAuthPlugin = async ({ client } = {}, options = {}) => {
         if (!next) return undefined
         const body = officeAceRecordBody(next)
         await pushSharedRecord(client, PROVIDER, next, fetcher)
+        // magpie merges this into the stored record. `accountId` is what the
+        // user's own name, proxy and gateway key for the account hang off, so a
+        // renewal never renames one: a stored value stands (phone or domain id,
+        // as `officeace-auth` wrote it), and one is only filled in when missing.
         return {
           access: body.access,
           refresh: body.refresh,
           expires: body.expires,
-          ...(body.accountId ? { accountId: body.accountId } : {}),
-          ...(body.uid ? { uid: body.uid } : {}),
+          ...(auth.accountId || !body.accountId ? {} : { accountId: body.accountId }),
+          ...(auth.uid || !body.uid ? {} : { uid: body.uid }),
         }
       },
 
       /** Rewrite Bearer to Basic, strip the provider prefix, renew once on a 401. */
       async loader(getAuth) {
-        let cred = credential(await getAuth())
+        const stored = await getAuth()
+        let cred = credential(stored)
         if (!cred) return {}
-        rememberLiveAccount(cred)
         const identity = accountIdentityOf(cred).id
         if (identity) noteProviderAccount(OFFICEACE_PROVIDER, identity)
 
@@ -3986,7 +3989,7 @@ export const OfficeAceAuthPlugin = async ({ client } = {}, options = {}) => {
           const healed = await withOfficeAceMaas(cred, fetcher)
           if (healed.model_app_key) {
             cred = healed
-            await persistOfficeAceRecord(client, cred)
+            await persistOfficeAceRecord(client, cred, stored)
           }
         }
         // Signed in, but MaaS was never opened for this account: say so instead
@@ -4016,7 +4019,8 @@ export const OfficeAceAuthPlugin = async ({ client } = {}, options = {}) => {
           baseURL: "",
           apiKey: "",
           async fetch(input, init) {
-            const fresh = credential(await getAuth().catch(() => null)) ?? cred
+            const freshRecord = await getAuth().catch(() => null)
+            const fresh = credential(freshRecord) ?? cred
             return officeAceChatFetch({
               input,
               init,
@@ -4026,7 +4030,7 @@ export const OfficeAceAuthPlugin = async ({ client } = {}, options = {}) => {
                 try {
                   const next = await renewNow(fresh)
                   if (next) {
-                    await persistOfficeAceRecord(client, next)
+                    await persistOfficeAceRecord(client, next, freshRecord ?? stored)
                     await pushSharedRecord(client, PROVIDER, next, fetcher)
                   }
                   return next
@@ -4044,9 +4048,10 @@ export const OfficeAceAuthPlugin = async ({ client } = {}, options = {}) => {
       async usage(getAuth) {
         const cred = credential(await getAuth())
         if (!cred) return { error: "未登录", windows: [] }
-        rememberLiveAccount(cred)
         try {
           const u = await fetchOfficeAceUsage(cred, fetcher)
+          // The phone is a display name, so it goes here only — never into the
+          // record's `accountId` (see officeAceIdentityOf).
           const user = firstOf(cred.user_phone, officeAceIdentityOf(cred).accountId)
           return {
             plan: u.plan || "OfficeAce",
@@ -4060,14 +4065,15 @@ export const OfficeAceAuthPlugin = async ({ client } = {}, options = {}) => {
 
       /** The daily claim; claiming twice is idempotent (a 2xx with no skus is `done`). */
       async checkin(getAuth) {
-        const cred = credential(await getAuth())
+        const stored = await getAuth()
+        const cred = credential(stored)
         if (!cred) return { outcome: "failed", message: "未登录" }
         try {
           let use = cred
           if (nearOfficeAceExpiry(cred) && cred.refresh_token) {
             try {
               use = (await renewNow(cred)) ?? cred
-              if (use !== cred) await persistOfficeAceRecord(client, use)
+              if (use !== cred) await persistOfficeAceRecord(client, use, stored)
             } catch {
               /* try with what is stored */
             }
@@ -4101,8 +4107,8 @@ export const _officeace = {
   fetchOfficeAceTokenRates, fetchOfficeAceCatalog, fetchOfficeAceMaasInfo, officeAceMaasInfo,
   signOfficeAceV11, oaSdkDate, officeAceSigned, basicAuthorization, isCodeArtsClient,
   renewOfficeAceCredential, renewSharedCredential, nearOfficeAceExpiry,
-  accountKeySuffix, recordKeyFor, writeSharedRecord, pushSharedRecord, adoptCodeArtsAccount,
-  noteProviderAccount, noteProviderEmpty, rememberLiveAccount, seenProviderAccounts,
+  accountKeySuffix, recordKeyFor, writeSharedRecord, pushSharedRecord, refreshChainOf,
+  noteProviderAccount, noteProviderEmpty, seenProviderAccounts,
   liveAccounts, sharedAccountKeys, renewalGates, withOfficeAceMaas, persistOfficeAceRecord,
   OFFICEACE_ICON,
 }

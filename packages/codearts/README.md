@@ -126,11 +126,30 @@ CodeArts' `snap-access` calls. A sign-in at either card writes both records — 
 saves for the provider signed in at, and the other provider's, in that provider's own shape.
 A record written this way lives at `<provider>#<hash of the account's identity>`, so signing in
 at that provider's own card later lands on the same account instead of adding a second one.
+A sign-in is the only thing that creates an OfficeAce account: a listing never adopts one from
+another provider's record, so an account the user signed out of cannot come back by itself.
 
 **From `officeace-auth`.** That package's records are read unchanged: the account is under the
 same provider id and its `access` field holds the same JSON (`modelAppKey`, `securityToken`,
 `dpopPrivateJwk`, `refreshToken` …). Its refresh token is still spent at the OAuth client it was
 issued to (`pdp5_for_agentarts`), so those accounts keep renewing too.
+
+**What a record is named, and what a renewal may touch.** `accountId` is the vendor's own stable
+id — the IAM domain id, as the record `officeace-auth` wrote carried — and never the masked
+phone: magpie hangs a user's own name for the account, its proxy and a gateway key off
+`accountId`, so the phone belongs only in `usage().user` (#483, magpie#4416). A renewal never
+renames an account: the stored `accountId` and `uid` stand exactly as written — the domain id, or
+the phone `officeace-auth` 0.1.14 stored — and a value computed from the credential is only
+filled in when the record has none. A new sign-in names its account by the domain id.
+
+**A record is renewed only with its own refresh token.** The unit of coordination is the refresh
+chain: the OAuth client a token was issued to plus the token itself. Two records written from one
+sign-in hold the same token and are one chain — that token is spent once however many hooks ask.
+An `officeace-auth` record beside a CodeArts record holds a different token (issuer
+`pdp5_for_agentarts` against `codearts-agent`), so it is another chain: it spends its own token,
+keeps its own MaaS pair, and a renewal that fails fails — it is never handed the other record's
+credential. The first record's renewal still *pushes* the new credential to the other one when
+that record's key is one this package wrote, which is how the two stay in step.
 
 **Models.** OfficeAce's catalog (`GET {maas}/v2/models`) is a registry, not a promise: 26 entries,
 most of which answer `404 ModelArts.81009 Invalid model` at chat. The plugin cuts it down to the
@@ -156,11 +175,11 @@ under **Settings → Usage → Plugins**.
 
 **Known limits.**
 
-- Both providers share one Huawei Cloud sign-in, and therefore one rotating refresh token at a
-  time: STS spends a refresh token once. Renewals are handed to the other record in the same
-  magpie process (the second caller gets the first's answer), and the first record's renewal
-  pushes the new credential to the other one when that record's key is one this package wrote.
-  Two *separate magpie processes* renewing both records at the very same moment can still race;
+- STS spends a refresh token once. Records that share one token (written from one sign-in) are
+  renewed once per process: the second caller waits for the first. A record whose token was
+  already spent elsewhere — the other magpie process renewed it and its push did not reach this
+  one — fails its renewal and asks for the sign-in again rather than taking another record's
+  credential. Two *separate magpie processes* renewing at the very same moment can still race;
   the loser then asks again and signs the account out only if the token stays spent.
 - `officeace-auth` and this package cannot both serve the `officeace` provider id. Magpie asks
   which plugin serves it; remove the old one.
@@ -223,8 +242,17 @@ OfficeAce 在 0.3.0 之前是独立的 `officeace-auth` 包：那些账号按 ma
   码道的 STS 三元组能签 OfficeAce 的订阅接口（V11-HMAC）并通过它的 CLAW 权限校验，反之 OfficeAce 的三元组也能签
   码道的 `snap-access` 接口。在任一张卡片登录都会写出**两条记录**（magpie 保存当前供应商的那条，插件写另一家的，
   各自用它自己的形状）；这样写出的记录放在 `<provider>#<账号身份哈希>` 上，之后在该供应商自己的卡片登录会合并到
-  同一账号，而不是多出一行。老 `officeace-auth` 的记录原样读取：provider id 相同、`access` 里的 JSON 形状相同，
+  同一账号，而不是多出一行。**只有登录会创建 OfficeAce 账号**：列模型时不会从另一家的记录「带入」一个账号，
+  用户登出的账号不会自己回来。老 `officeace-auth` 的记录原样读取：provider id 相同、`access` 里的 JSON 形状相同，
   续期仍走它签发时的 OAuth 客户端（`pdp5_for_agentarts`）。
+- **账号名与续期边界**：`accountId` 用厂商自己的稳定 id（IAM 域名 id，与老 `officeace-auth` 记录里的一致），
+  **绝不是打码手机号**（#483、magpie#4416；magpie 把用户给账号起的名字、代理、网关 key 都挂在 `accountId` 上，
+  手机号只出现在 `usage().user`）。续期不会重命名账号：记录里已有的 `accountId`/`uid` 原样保留（域名 id，或
+  `officeace-auth` 0.1.14 存下的手机号），只在该值为空时才补一个。新登录写的 `accountId` 是域名 id。
+  续期只花**这条记录自己的 refresh token**：协调单位是「refresh chain = 签发它的 OAuth 客户端 + token 本身」。
+  同一次登录写出的两条记录持有同一个 token，算同一条链，一个进程内只花一次；老 `officeace-auth` 记录与码道记录
+  是两个 token（`pdp5_for_agentarts` 与 `codearts-agent`），各花各的，各自保留自己的 MaaS 凭据，续期失败就是失败，
+  绝不会借用另一条记录的凭据；先续期的那条记录仍会把新凭据推给本包写过的另一条。
 - **OfficeAce 的模型**：目录 `/v2/models` 是注册表（26 条，多数对话时回 `404 ModelArts.81009 Invalid model`），
   插件只保留计费清单（`/v1/model-token-rates`，9 条）里的，并永不列出三个实测必 404 的 id；倍率表读取失败时保留上
   一份好表（空表会让不可调的 id 全部回到用户面前）；未登录时用 10 个内置模型兜底。模型名带上倍率（`GLM-5.3 · x0.18`），
@@ -236,9 +264,10 @@ OfficeAce 在 0.3.0 之前是独立的 `officeace-auth` 包：那些账号按 ma
 - **OfficeAce 的用量与签到**：`/v1/subscription` 的套餐桶（`skus[].quotas`）与活动桶（`bonus_skus`）转成 magpie 的窗口；
   `.trial` 桶没有到期时间就不显示；已过期的桶收进折叠区（`aside`）且不参与路由。签到是每个北京自然日一次
   `POST /v1/subscription/bonus/claim`：2xx 但 `bonus_skus` 为空是「今日已无新增可领」（`done`），不是失败。
-- **已知限制**：两个供应商共用同一次登录，也就共用同一条会轮换的 refresh_token（STS 的 refresh_token 只能用一次）。
-  同一 magpie 进程内两次续期会合并（后来者拿先到者的结果）；先续期的那条记录还会把新凭据推给本包写过的另一条记录。
-  **两个 magpie 进程同时续期两条记录**仍可能撞车，输的一方会重试，只有当 token 一直是被消费状态时才标记需要重新登录。
+- **已知限制**：STS 的 refresh_token 只能用一次。持有同一个 token 的记录（同一次登录写出的两条）在一个 magpie 进程内
+  只续期一次，后来者等先到者的结果；token 已在别处被花掉的记录（另一个 magpie 进程续期了、推送却没到）续期会失败并
+  要求重新登录，而不是拿走另一条记录的凭据。**两个 magpie 进程同时续期**仍可能撞车，输的一方会重试，只有当 token
+  一直是被消费状态时才标记需要重新登录。
   另外，`officeace-auth` 与本包不能同时服务 `officeace` 这个 provider id，magpie 会让你选一个，装之前先卸掉旧的。
 - **致谢**：原作者 [yuweihao17](https://github.com/yuweihao17/codearts)；HuHong-Tao、ReachForStar 的
   实测与实现；[Ebony-Vinyl/dsh-our-free-model](https://github.com/Ebony-Vinyl/dsh-our-free-model)。

@@ -2700,10 +2700,13 @@ test("an account signed in through officeace-auth is read as it is, no second si
   )
 })
 
-test("the record officeace-auth wrote is what a card shows: phone as the name, IAM id as the identity", async () => {
+test("the record officeace-auth wrote is named by the vendor's stable id, never by the phone", async () => {
   const { credential, record } = await officeAceAuthRecord()
   const identity = oa.officeAceIdentityOf(oa.officeAceCredentialOf(record))
-  assert.deepEqual(identity, { accountId: "189****8051", uid: "01a1642ad2ae7f93bf6387ad2fc5f09e" })
+  // accountId is what a user's own name, proxy and gateway key hang off (#483,
+  // magpie#4416): the vendor's domain id, never the masked phone. The phone is
+  // a display name and shows up only in usage().user.
+  assert.deepEqual(identity, { accountId: "01a1642ad2ae7f93bf6387ad2fc5f09e", uid: "01a1642ad2ae7f93bf6387ad2fc5f09e" })
   // Writing it back gives the same shape, so the two packages can share a record.
   const again = oa.officeAceCredentialOf({ access: JSON.stringify(oa.officeAceCredentialRecord(oa.officeAceCredentialOf(record))) })
   assert.equal(again.access_key_id, credential.access)
@@ -3018,7 +3021,7 @@ test("a CodeArts sign-in writes the OfficeAce record of the same account", async
   assert.equal(written.securityToken, "ST-AK-CODEARTS")
   assert.equal(written.modelAppKey, "app-key")
   assert.equal(written.oauth_client, "codearts-agent")
-  assert.equal(officeaceWrite.body.accountId, "189****8051")
+  assert.equal(officeaceWrite.body.accountId, "01a1642ad2ae7f93bf6387ad2fc5f09e")
   assert.equal(officeaceWrite.body.uid, "01a1642ad2ae7f93bf6387ad2fc5f09e")
   // and this card's own record was put at a key a renewal can find again
   assert.match(calls.find((c) => c.path?.id?.startsWith("codearts#"))?.path.id ?? "", /^codearts#[0-9a-f]{8}$/)
@@ -3049,7 +3052,8 @@ test("the OfficeAce sign-in writes the CodeArts record of the same account", asy
   const own = JSON.parse(out.access)
   assert.equal(own.securityToken, "ST-AK-OFFICEACE")
   assert.equal(own.modelAppKey, "app-key")
-  assert.equal(out.accountId, "189****8051")
+  // the vendor's stable id, not the phone the card shows as usage().user
+  assert.equal(out.accountId, "01a1642ad2ae7f93bf6387ad2fc5f09e")
 
   const codeartsWrite = calls.find((c) => c.path?.id === "codearts")
   assert.ok(codeartsWrite, "the CodeArts record is written by the same sign-in")
@@ -3080,29 +3084,189 @@ test("an account already signed in at the other provider is not written a second
   assert.equal(calls.length, 0)
 })
 
-test("one refresh token is spent once, whichever provider's record renews", async () => {
+test("one refresh token is spent once, for the two records that hold it", async () => {
   oa.renewalGates.clear()
-  oa.liveAccounts.clear()
   const { credential } = await officeAceAuthRecord({}, "iam::d1:user:hw0400")
   const cred = oa.officeAceCredentialOf({ access: JSON.stringify(credential) })
   let stsCalls = 0
   const fetcher = async (url) => {
     if (String(url) === x.STS_TOKEN_ENDPOINT) {
       stsCalls++
+      await new Promise((resolve) => setTimeout(resolve, 5))
       return new Response(stsBody("AK3", oaRefreshToken({ principal_urn: "iam::d1:user:hw0400", jti: "rotated" })), { status: 200 })
     }
     return new Response("{}", { status: 200 })
   }
   const run = (c) => oa.renewSharedCredential(c, () => oa.renewOfficeAceCredential(c, fetcher))
   const [a, b] = await Promise.all([run(cred), run({ ...cred })])
-  assert.equal(stsCalls, 1)
+  assert.equal(stsCalls, 1, "both records hold this one token: it is spent once")
   assert.equal(a.access_key_id, "AK3")
   assert.equal(b.access_key_id, "AK3")
-  // a record still holding the spent token takes the credential this process
-  // renewed a moment ago instead of spending it again
-  const late = await run(cred)
+})
+
+test("a spent token is not renewed again, and is never refilled from another chain", async () => {
+  oa.renewalGates.clear()
+  const { credential } = await officeAceAuthRecord({}, "iam::d1:user:hw0410")
+  const cred = oa.officeAceCredentialOf({ access: JSON.stringify(credential) })
+  let stsCalls = 0
+  const fetcher = async (url) => {
+    if (String(url) === x.STS_TOKEN_ENDPOINT) {
+      stsCalls++
+      // the token was spent elsewhere: STS turns it away for good
+      return new Response(JSON.stringify({ error_code: "STS5.1806", error_msg: "refresh token has been used" }), { status: 400 })
+    }
+    return new Response("{}", { status: 200 })
+  }
+  await assert.rejects(() => oa.renewSharedCredential(cred, () => oa.renewOfficeAceCredential(cred, fetcher)))
   assert.equal(stsCalls, 1)
-  assert.equal(late.access_key_id, "AK3")
+  // the failure stays a failure: no second attempt, no borrowed credential
+  await assert.rejects(() => oa.renewSharedCredential(cred, () => oa.renewOfficeAceCredential(cred, fetcher)))
+  assert.equal(stsCalls, 2, "each attempt spends what the record holds — nothing else")
+})
+
+test("the refresh chain is the OAuth client plus the token, never the account", () => {
+  const token = "h.x.y"
+  const pdp = oa.refreshChainOf({ refresh_token: token, oauth_client: "pdp5_for_agentarts" })
+  const ca = oa.refreshChainOf({ refresh_token: token, oauth_client: "codearts-agent" })
+  assert.notEqual(pdp, ca, "one token at two clients is two chains")
+  assert.equal(pdp, oa.refreshChainOf({ refresh_token: token, oauth_client: "pdp5_for_agentarts" }))
+  assert.equal(oa.refreshChainOf({}), "")
+})
+
+test("two records on different chains renew independently, each with its own client", async () => {
+  oa.renewalGates.clear()
+  const { credential } = await officeAceAuthRecord({}, "iam::d1:user:hw5030")
+  const pdpCred = oa.officeAceCredentialOf({ access: JSON.stringify(credential) })
+  const caCred = await codeArtsSignInCredential({ refresh_token: oaRefreshToken({ principal_urn: "iam::d1:user:hw5030", jti: "Y" }) })
+  const clients = []
+  const fetcher = async (url, init) => {
+    if (String(url) === x.STS_TOKEN_ENDPOINT) {
+      clients.push(new URLSearchParams(String(init.body)).get("client_id"))
+      return new Response(stsBody(clients.length === 1 ? "AK-PDP" : "AK-CA", oaRefreshToken({ principal_urn: "iam::d1:user:hw5030", jti: `R${clients.length}` })), { status: 200 })
+    }
+    return new Response("{}", { status: 200 })
+  }
+  const officeAceNext = await oa.renewSharedCredential(pdpCred, () => oa.renewOfficeAceCredential(pdpCred, fetcher))
+  const codeArtsNext = await oa.renewSharedCredential(caCred, () => x.refreshCredential(caCred, fetcher))
+  assert.deepEqual(clients, ["pdp5_for_agentarts", "codearts-agent"])
+  assert.equal(officeAceNext.access_key_id, "AK-PDP")
+  assert.equal(codeArtsNext.access_key_id, "AK-CA")
+})
+
+test("an officeace-auth record is renewed with its own token, after the CodeArts record of the account was polled", async () => {
+  oa.renewalGates.clear()
+  oa.seenProviderAccounts.clear()
+  oa.sharedAccountKeys.clear()
+  // The record officeace-auth wrote: its own chain, issued to pdp5_for_agentarts.
+  const { record: oldRecord } = await officeAceAuthRecord({}, "iam::d1:user:hw5000")
+  // The CodeArts record beside it, of the same Huawei Cloud account, on its own chain.
+  const caCred = await codeArtsSignInCredential({ refresh_token: oaRefreshToken({ principal_urn: "iam::d1:user:hw5000", jti: "Y1" }) })
+  const codeartsRecord = {
+    type: "oauth",
+    access: JSON.stringify(caCred),
+    refresh: caCred.refresh_token,
+    expires: Date.parse("2031-01-01T00:00:00Z"),
+    accountId: "iam::d1:user:hw5000",
+    uid: "iam::d1:user:hw5000",
+  }
+  const bodies = []
+  const fetcher = async (url, init) => {
+    if (String(url) === x.STS_TOKEN_ENDPOINT) {
+      bodies.push(String(init.body))
+      return new Response(stsBody("AK-X2", oaRefreshToken({ principal_urn: "iam::d1:user:hw5000", jti: "X2" })), { status: 200 })
+    }
+    return new Response("{}", { status: 200 })
+  }
+  // magpie polls usage() of every account, which is what used to leave the
+  // CodeArts credential in a process-wide ledger the OfficeAce record then took.
+  const ca = await CodeArtsAuthPlugin({ client: oaClient() }, { fetch: fetcher })
+  await ca.auth.usage(async () => codeartsRecord)
+
+  const of = await OfficeAceAuthPlugin({ client: oaClient() }, { fetch: fetcher })
+  const out = await of.auth.refresh(oldRecord)
+  const written = JSON.parse(out.access)
+
+  assert.equal(bodies.length, 1, "the old record spends its own refresh token")
+  assert.match(bodies[0], /client_id=pdp5_for_agentarts/)
+  assert.equal(written.access, "AK-X2")
+  assert.equal(written.oauth_client, "pdp5_for_agentarts")
+  // the MaaS pair the old record carried survives the rotation (chat needs it)
+  assert.equal(written.modelAppKey, "app-key")
+  assert.equal(written.modelAppSecret, "app-secret")
+  // and the account is not renamed: it already has an accountId
+  assert.equal(out.accountId, undefined)
+})
+
+test("a CodeArts renewal that fails at STS fails, and is never handed the OfficeAce record's credential", async () => {
+  oa.renewalGates.clear()
+  const { record: oldRecord } = await officeAceAuthRecord({}, "iam::d1:user:hw5010")
+  const caCred = await codeArtsSignInCredential({ refresh_token: oaRefreshToken({ principal_urn: "iam::d1:user:hw5010", jti: "Y1" }) })
+  const codeartsRecord = {
+    type: "oauth",
+    access: JSON.stringify(caCred),
+    refresh: caCred.refresh_token,
+    expires: Date.parse("2031-01-01T00:00:00Z"),
+    accountId: "iam::d1:user:hw5010",
+    uid: "iam::d1:user:hw5010",
+  }
+  const fetcher = async (url) => {
+    if (String(url) === x.STS_TOKEN_ENDPOINT) return new Response("upstream down", { status: 503 })
+    return new Response("{}", { status: 200 })
+  }
+  const of = await OfficeAceAuthPlugin({ client: oaClient() }, { fetch: fetcher })
+  await of.auth.usage(async () => oldRecord) // the other record is in this process too
+  const ca = await CodeArtsAuthPlugin({ client: oaClient() }, { fetch: fetcher })
+  await assert.rejects(() => ca.auth.refresh(codeartsRecord), /503/)
+})
+
+test("a renewal keeps the stored accountId and uid, so a user's name and keys stay with the account", async () => {
+  oa.renewalGates.clear()
+  const { record } = await officeAceAuthRecord({}, "iam::d1:user:hw5020")
+  const stored = { ...record, accountId: "189****8051", uid: "01a1642ad2ae7f93bf6387ad2fc5f09e" }
+  const fetcher = async (url) =>
+    String(url) === x.STS_TOKEN_ENDPOINT
+      ? new Response(stsBody("AK-X3", oaRefreshToken({ principal_urn: "iam::d1:user:hw5020", jti: "X3" })), { status: 200 })
+      : new Response("{}", { status: 200 })
+  const of = await OfficeAceAuthPlugin({ client: oaClient() }, { fetch: fetcher })
+  const out = await of.auth.refresh(stored)
+  // magpie merges the answer into the record: nothing here renames the account
+  assert.equal(out.accountId, undefined)
+  assert.equal(out.uid, undefined)
+
+  // and a persist (a renewal met in a request) writes the stored ones back
+  const calls = []
+  await oa.persistOfficeAceRecord(oaClient(calls), oa.officeAceCredentialOf(stored), stored)
+  assert.equal(calls[0].body.accountId, "189****8051")
+  assert.equal(calls[0].body.uid, "01a1642ad2ae7f93bf6387ad2fc5f09e")
+})
+
+test("an OfficeAce account is only ever created by a sign-in: a listing writes no record", async () => {
+  oa.seenProviderAccounts.clear()
+  oa.sharedAccountKeys.clear()
+  const calls = []
+  const fetcher = async () => new Response("{}", { status: 200 })
+  // A CodeArts account of the same Huawei Cloud account is signed in and polled
+  // (what magpie does for every account), and the OfficeAce card has none: the
+  // listing must not create one for it. An account the user signed out of must
+  // not come back on the next listing.
+  const caCred = await codeArtsSignInCredential({ refresh_token: oaRefreshToken({ principal_urn: "iam::d1:user:hw5040", jti: "Y1" }) })
+  const codeartsRecord = {
+    type: "oauth",
+    access: JSON.stringify(caCred),
+    refresh: caCred.refresh_token,
+    expires: Date.parse("2031-01-01T00:00:00Z"),
+    accountId: "iam::d1:user:hw5040",
+    uid: "iam::d1:user:hw5040",
+  }
+  const ca = await CodeArtsAuthPlugin({ client: oaClient() }, { fetch: fetcher })
+  await ca.auth.usage(async () => codeartsRecord)
+
+  const plugin = await OfficeAceAuthPlugin({ client: oaClient(calls) }, { fetch: fetcher })
+  const cfg = { provider: {} }
+  await plugin.config(cfg)
+  const models = await plugin.provider.models(cfg.provider.officeace, {})
+  assert.deepEqual(Object.keys(models).sort(), Object.keys(oa.OA_FALLBACK_MODELS).sort())
+  assert.equal(calls.length, 0, "no record is written by a listing")
 })
 
 test("a renewal hands the other record of the account the new credential", async () => {
